@@ -1,0 +1,39 @@
+# =============================================================================
+# NexusQuant — Core Trading Configuration
+# =============================================================================
+
+trading:
+  default_symbol: "BTC/USDT"
+  primary_timeframe: "1h"
+  secondary_timeframe: "15m"
+  tertiary_timeframe: "5m"
+  default_limit: 500           # Number of OHLCV candles to fetch by default
+  sandbox_mode: true           # Use exchange sandbox/testnet if available
+
+data:
+  raw_path: "data/raw"
+  processed_path: "data/processed"
+  cache_enabled: true
+  cache_ttl_seconds: 300       # How long to keep cached OHLCV data
+
+exchange:
+  name: "binance"
+  rate_limit_ms: 1200          # Milliseconds between API calls (respects ccxt defaults)
+  timeout_ms: 30000            # Request timeout in milliseconds
+
+risk:
+  max_position_size_usdt: 100.0
+  max_drawdown_percent: 5.0
+  max_open_trades: 3
+
+llm:
+  model: "gemma3:4b"
+  temperature: 0.1             # Low temperature → deterministic, analytical responses
+  max_tokens: 2048
+  request_timeout_seconds: 120
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  max_bytes: 10485760          # 10 MB per log file
+  backup_count: 5

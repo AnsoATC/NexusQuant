@@ -5,6 +5,11 @@ ccxt>=4.3.0
 pandas>=2.2.0
 numpy>=1.26.0
 
+# ── Technical Indicators ──────────────────────────────────────────────────────
+# pandas-ta-openbb: Python 3.10-compatible fork of pandas-ta with full API parity.
+# The original pandas-ta requires Python >=3.12.
+pandas-ta-openbb>=0.4.24
+
 # ── Configuration & Environment ───────────────────────────────────────────────
 python-dotenv>=1.0.0
 pyyaml>=6.0.1

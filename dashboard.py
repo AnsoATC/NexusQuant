@@ -1,152 +1,82 @@
-"""NexusQuant Alpha Arena — Multi-Agent Real-Time Trading Dashboard.
+"""NexusQuant Alpha Arena — Session-Based Live Trading Dashboard.
 
-Three Gemma 4 personas reason over the same market data simultaneously.
-Phase 5 adds Testnet execution mode and live balance checking via BinanceBroker.
+Architecture note: uses the st.rerun() state-machine pattern instead of
+a blocking while-loop so the STOP button always works.
 
-Launch with:
+Launch:
     conda run -n trading_bot streamlit run dashboard.py
 """
-
 from __future__ import annotations
-
 import logging
 import time
+from datetime import datetime, timezone
 
 import streamlit as st
 
-st.set_page_config(
-    page_title="NexusQuant · Alpha Arena",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="NexusQuant · Alpha Arena", page_icon="⚡",
+                   layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: linear-gradient(135deg, #060b18 0%, #0a0f1e 50%, #080d1a 100%); }
-
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #080d1a 0%, #0f1424 100%) !important;
-    border-right: 1px solid #1a2740;
-}
-[data-testid="stSidebar"] * { color: #c9d6e3 !important; }
-
-.agent-card {
-    background: linear-gradient(145deg, #0e1628, #0b1220);
-    border-radius: 18px; padding: 22px 20px 16px 20px; margin-bottom: 14px;
-    transition: border-color 0.3s, box-shadow 0.3s;
-}
-.agent-card-dimmer { border:1px solid #2d3faa; box-shadow:0 4px 28px rgba(99,102,241,0.12); }
-.agent-card-zenith  { border:1px solid #065f46; box-shadow:0 4px 28px rgba(16,185,129,0.12); }
-.agent-card-aegis   { border:1px solid #7c1c6e; box-shadow:0 4px 28px rgba(236,72,153,0.12); }
-.agent-card-dimmer:hover { border-color:#6366f1; box-shadow:0 4px 32px rgba(99,102,241,0.25); }
-.agent-card-zenith:hover  { border-color:#10b981; box-shadow:0 4px 32px rgba(16,185,129,0.25); }
-.agent-card-aegis:hover   { border-color:#ec4899; box-shadow:0 4px 32px rgba(236,72,153,0.25); }
-
-.badge-buy  { background:#064e3b; color:#34d399; border:1px solid #059669; padding:5px 16px; border-radius:20px; font-weight:700; font-size:15px; letter-spacing:1px; }
-.badge-sell { background:#450a0a; color:#f87171; border:1px solid #dc2626; padding:5px 16px; border-radius:20px; font-weight:700; font-size:15px; letter-spacing:1px; }
-.badge-hold { background:#1c1208; color:#fbbf24; border:1px solid #d97706; padding:5px 16px; border-radius:20px; font-weight:700; font-size:15px; letter-spacing:1px; }
-
-.big-metric { font-size:30px; font-weight:700; font-family:'JetBrains Mono',monospace; letter-spacing:-1px; }
-.metric-label { font-size:10px; font-weight:600; color:#4b5563; text-transform:uppercase; letter-spacing:1.5px; margin-bottom:3px; }
-
-.conf-bar-wrap { background:#1a2130; border-radius:8px; height:10px; margin:10px 0 5px 0; overflow:hidden; }
-.conf-bar-fill { height:100%; border-radius:8px; transition:width 0.6s ease; }
-
-.reason-box {
-    background:#070d1a; border:1px solid #1a2740; border-radius:10px;
-    padding:11px 14px; font-size:13px; color:#8899aa;
-    font-style:italic; line-height:1.65; margin-top:12px; min-height:56px;
-}
-.persona-tag {
-    display:inline-block; font-size:10px; font-weight:600;
-    text-transform:uppercase; letter-spacing:1.5px;
-    padding:3px 10px; border-radius:12px; margin-bottom:12px;
-}
-.persona-dimmer { background:#1e1f5e; color:#818cf8; }
-.persona-zenith  { background:#064030; color:#34d399; }
-.persona-aegis   { background:#4a0d3f; color:#f472b6; }
-.agent-name { font-size:20px; font-weight:700; color:#e2e8f0; margin:0 0 2px 0; }
-
-.err-box { background:#3b0a0a; border:1px solid #7f1d1d; border-radius:8px; padding:11px 15px; color:#fca5a5; font-size:13px; margin-top:8px; }
-.pending-box { background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px; color:#374151; font-size:13px; text-align:center; margin-top:8px; }
-
-/* ── Execution mode badge ── */
-.mode-paper   { background:#1c1208; color:#fbbf24; border:1px solid #d97706; padding:4px 14px; border-radius:16px; font-size:12px; font-weight:700; }
-.mode-testnet { background:#064e3b; color:#34d399; border:1px solid #059669; padding:4px 14px; border-radius:16px; font-size:12px; font-weight:700; }
-
-div[data-testid="stButton"] > button {
-    background: linear-gradient(135deg,#1d4ed8,#4f46e5) !important;
-    color: white !important; border: none !important; border-radius: 12px !important;
-    font-weight: 700 !important; width: 100% !important; padding: 14px !important;
-    font-size: 15px !important; letter-spacing: 0.5px !important;
-}
-div[data-testid="stButton"] > button:hover {
-    background: linear-gradient(135deg,#2563eb,#7c3aed) !important;
-    box-shadow: 0 0 24px rgba(99,102,241,0.5) !important;
-}
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+.stApp{background:linear-gradient(135deg,#060b18 0%,#0a0f1e 50%,#080d1a 100%);}
+[data-testid="stSidebar"]{background:linear-gradient(180deg,#080d1a 0%,#0f1424 100%) !important;border-right:1px solid #1a2740;}
+[data-testid="stSidebar"] *{color:#c9d6e3 !important;}
+.agent-card{background:linear-gradient(145deg,#0e1628,#0b1220);border-radius:16px;padding:18px 16px;margin-bottom:12px;}
+.card-dimmer{border:1px solid #2d3faa;} .card-zenith{border:1px solid #065f46;} .card-aegis{border:1px solid #7c1c6e;}
+.badge-buy{background:#064e3b;color:#34d399;border:1px solid #059669;padding:4px 14px;border-radius:20px;font-weight:700;font-size:14px;}
+.badge-sell{background:#450a0a;color:#f87171;border:1px solid #dc2626;padding:4px 14px;border-radius:20px;font-weight:700;font-size:14px;}
+.badge-hold{background:#1c1208;color:#fbbf24;border:1px solid #d97706;padding:4px 14px;border-radius:20px;font-weight:700;font-size:14px;}
+.conf-wrap{background:#1a2130;border-radius:6px;height:8px;margin:8px 0 4px;overflow:hidden;}
+.conf-fill{height:100%;border-radius:6px;}
+.reason-box{background:#070d1a;border:1px solid #1a2740;border-radius:8px;padding:10px 13px;font-size:12px;color:#8899aa;font-style:italic;margin-top:10px;min-height:48px;}
+.err-box{background:#3b0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:10px;color:#fca5a5;font-size:12px;margin-top:8px;}
+.log-entry{font-family:'JetBrains Mono',monospace;font-size:11px;color:#64748b;padding:2px 0;border-bottom:1px solid #0f1628;}
+.log-buy{color:#34d399;} .log-sell{color:#f87171;} .log-err{color:#f87171;} .log-info{color:#60a5fa;}
+.session-active{background:#064e3b;border:1px solid #059669;border-radius:10px;padding:10px 16px;color:#34d399;font-weight:600;font-size:14px;margin-bottom:12px;}
+.session-stopped{background:#1c1208;border:1px solid #d97706;border-radius:10px;padding:10px 16px;color:#fbbf24;font-weight:600;font-size:14px;margin-bottom:12px;}
+.mode-badge{background:#064e3b;color:#34d399;border:1px solid #059669;padding:4px 14px;border-radius:16px;font-size:12px;font-weight:700;}
+div[data-testid="stButton"]>button{background:linear-gradient(135deg,#1d4ed8,#4f46e5) !important;color:white !important;border:none !important;border-radius:10px !important;font-weight:700 !important;width:100% !important;padding:12px !important;font-size:14px !important;}
+.stop-btn div[data-testid="stButton"]>button{background:linear-gradient(135deg,#991b1b,#7f1d1d) !important;}
 </style>
 """, unsafe_allow_html=True)
 
 logging.basicConfig(level=logging.WARNING)
 
-# ── Agent roster ──────────────────────────────────────────────────────────────
-AGENT_META: dict[str, dict] = {
-    "DimmerForce": {
-        "icon": "📈", "color": "#818cf8", "persona": "Trend Follower",
-        "persona_class": "persona-dimmer", "card_class": "agent-card-dimmer",
-        "balance_color": "#818cf8", "description": "Rides momentum via MACD & EMA alignment",
-    },
-    "Zenith": {
-        "icon": "🔄", "color": "#34d399", "persona": "Mean Reversion",
-        "persona_class": "persona-zenith", "card_class": "agent-card-zenith",
-        "balance_color": "#34d399", "description": "Fades extremes using RSI as primary signal",
-    },
-    "Aegis": {
-        "icon": "🛡️", "color": "#f472b6", "persona": "Conservative",
-        "persona_class": "persona-aegis", "card_class": "agent-card-aegis",
-        "balance_color": "#f472b6", "description": "HOLDs unless ALL indicators align perfectly",
-    },
+# ── Agent metadata ─────────────────────────────────────────────────────────────
+AGENT_META = {
+    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer","executes":True},
+    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith","executes":False},
+    "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis", "executes":False},
 }
+EXEC_AGENT = "DimmerForce"   # the sole order-executing agent
 
 
-def _badge(action: str) -> str:
-    cls = {"BUY": "badge-buy", "SELL": "badge-sell"}.get(action, "badge-hold")
-    return f'<span class="{cls}">{action}</span>'
+# ── Session state initialisation ───────────────────────────────────────────────
+def _init():
+    defaults = {
+        "session_active": False,
+        "session_start_ts": None,
+        "session_duration_h": 4.0,
+        "tick_interval_s": 300,
+        "tick_count": 0,
+        "signals": {k: None for k in AGENT_META},
+        "errors":  {k: None for k in AGENT_META},
+        "last_price": None,
+        "last_tick_s": None,
+        "enriched_df": None,
+        "order_log": [],          # list[str] of human-readable log lines
+        "broker": None,           # cached BinanceBroker instance
+        "testnet_balance": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+_init()
 
 
-def _conf_bar(confidence: float, color: str) -> str:
-    pct = int(confidence * 100)
-    bar_color = "#34d399" if confidence >= 0.7 else "#fbbf24" if confidence >= 0.5 else "#f87171"
-    return (
-        f'<div class="conf-bar-wrap">'
-        f'<div class="conf-bar-fill" style="width:{pct}%;background:{bar_color};"></div>'
-        f'</div>'
-        f'<span style="font-size:12px;color:{bar_color};font-weight:600;">{pct}% confidence</span>'
-    )
-
-
-def _render_signal_card(signal: dict | None, error: str | None, meta: dict) -> None:
-    if error:
-        st.markdown(f'<div class="err-box">⚠️ {error}</div>', unsafe_allow_html=True)
-        return
-    if signal is None:
-        st.markdown(
-            '<div class="pending-box">⏳ No signal yet — click <b>Run Simulation Tick</b></div>',
-            unsafe_allow_html=True,
-        )
-        return
-    action = signal.get("action", "HOLD")
-    confidence = float(signal.get("confidence", 0.0))
-    reason = signal.get("reason", "—")
-    st.markdown(_badge(action), unsafe_allow_html=True)
-    st.markdown(_conf_bar(confidence, meta["color"]), unsafe_allow_html=True)
-    st.markdown(f'<div class="reason-box">💬 {reason}</div>', unsafe_allow_html=True)
-
-
+# ── Cached pipeline loader ─────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def _load_pipeline():
     from src.agents import AegisAgent, DimmerForceAgent, ZenithAgent
@@ -155,270 +85,350 @@ def _load_pipeline():
     return MarketDataFetcher, FeatureEngineer, DimmerForceAgent, ZenithAgent, AegisAgent
 
 
-def _init_state(allocations: dict[str, float]) -> None:
-    defaults = {
-        "signals": {k: None for k in AGENT_META},
-        "errors":  {k: None for k in AGENT_META},
-        "balances": dict(allocations),
-        "tick_count": 0,
-        "last_price": None,
-        "last_tick_s": None,
-        "enriched_df": None,
-    }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _ts() -> str:
+    return datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+def _log(msg: str, kind: str = "info") -> None:
+    entry = f'<div class="log-entry log-{kind}">[{_ts()}] {msg}</div>'
+    st.session_state.order_log.insert(0, entry)
+    if len(st.session_state.order_log) > 100:
+        st.session_state.order_log.pop()
+
+def _badge(action: str) -> str:
+    cls = {"BUY":"badge-buy","SELL":"badge-sell"}.get(action,"badge-hold")
+    return f'<span class="{cls}">{action}</span>'
+
+def _conf_bar(conf: float) -> str:
+    pct = int(conf * 100)
+    c = "#34d399" if conf >= 0.7 else "#fbbf24" if conf >= 0.5 else "#f87171"
+    return (f'<div class="conf-wrap"><div class="conf-fill" style="width:{pct}%;background:{c};"></div></div>'
+            f'<span style="font-size:11px;color:{c};font-weight:600;">{pct}% confidence</span>')
+
+def _get_broker():
+    if st.session_state.broker is None:
+        from src.execution.broker import BinanceBroker
+        st.session_state.broker = BinanceBroker()
+    return st.session_state.broker
+
+def _elapsed_s() -> float:
+    if st.session_state.session_start_ts is None:
+        return 0.0
+    return time.time() - st.session_state.session_start_ts
+
+def _session_expired() -> bool:
+    return _elapsed_s() >= st.session_state.session_duration_h * 3600
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ⚡ NexusQuant")
-    st.markdown(
-        '<div style="color:#374151;font-size:12px;margin-bottom:20px;">'
-        'Alpha Arena · v0.6 · Phase 5 · Testnet Ready</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Execution mode toggle ─────────────────────────────────────────────────
-    st.markdown("### 🔀 Execution Mode")
-    execution_mode = st.radio(
-        label="execution_mode_radio",
-        options=["📄 Paper Trading", "🌐 Testnet (Binance)"],
-        index=0,
-        label_visibility="collapsed",
-        help="Paper Trading: simulates locally with no exchange calls.\n"
-             "Testnet: routes orders to Binance Spot Testnet (real API, fake funds).",
-    )
-    is_testnet = execution_mode == "🌐 Testnet (Binance)"
-
-    if is_testnet:
-        st.markdown(
-            '<div class="mode-testnet">🌐 TESTNET ACTIVE</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div style="font-size:11px;color:#374151;margin-top:6px;line-height:1.6;">'
-            '⚠️ Orders routed to Binance Spot Testnet.<br>'
-            'Ensure <code>.env</code> has valid testnet keys.<br>'
-            '<a href="https://testnet.binance.vision/" style="color:#34d399;">'
-            'Get testnet keys →</a></div>',
-            unsafe_allow_html=True,
-        )
-
-        # ── Check Testnet Balance button ──────────────────────────────────────
-        st.markdown("---")
-        if st.button("🔍 Check Testnet Balance", key="check_balance"):
-            with st.spinner("Connecting to Binance Testnet…"):
-                try:
-                    from src.execution.broker import BinanceBroker, BrokerError
-                    broker = BinanceBroker()
-                    usdt_balance = broker.get_free_balance("USDT")
-                    btc_balance  = broker.get_free_balance("BTC")
-                    st.success(
-                        f"✅ Connected to Binance Testnet\n\n"
-                        f"**USDT:** {usdt_balance:,.4f}\n\n"
-                        f"**BTC:** {btc_balance:.8f}"
-                    )
-                except Exception as exc:
-                    st.error(f"❌ Testnet connection failed:\n\n{exc}")
-    else:
-        st.markdown(
-            '<div class="mode-paper">📄 PAPER TRADING</div>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    st.markdown("### ⚙️ Global Settings")
-
-    # NOTE: Risk slider is display-only. Phase 6 will write this back to
-    # config/settings.yaml via yaml.safe_dump() on a "Save Settings" button.
-    risk_pct = st.slider(
-        "Risk Per Trade (%)", min_value=1.0, max_value=10.0, value=2.0, step=0.5,
-        help="Will persist to config/settings.yaml in Phase 6.",
-    )
-
-    symbol    = st.selectbox("Trading Pair", ["BTC/USDT", "ETH/USDT", "SOL/USDT"], index=0)
-    timeframe = st.selectbox("Timeframe", ["1h", "15m", "4h"], index=0)
-    candle_limit = st.slider("Candles to Fetch", 60, 300, 100, step=10)
-
-    st.markdown("### 💰 Agent Allocation (USDT)")
-    alloc = {
-        "DimmerForce": st.number_input("DimmerForce", 0.0, 10000.0, 50.0, step=5.0),
-        "Zenith":      st.number_input("Zenith",      0.0, 10000.0, 50.0, step=5.0),
-        "Aegis":       st.number_input("Aegis",       0.0, 10000.0, 50.0, step=5.0),
-    }
-    total_capital = sum(alloc.values())
-    st.markdown(
-        f'<div style="margin-top:12px;padding:12px;background:#070d1a;border-radius:10px;'
-        f'border:1px solid #1a2740;">'
-        f'<div class="metric-label">Total Capital</div>'
-        f'<div style="font-size:22px;font-weight:700;color:#60a5fa;font-family:monospace;">'
-        f'${total_capital:,.2f} USDT</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("---")
-    st.markdown(
-        '<div style="font-size:11px;color:#1f2937;line-height:1.7;">'
-        '🤖 All 3 agents use Gemma 4 (local Ollama).<br>'
-        '💡 Same model — different system prompt personas.<br>'
-        '🔒 Keys loaded from .env — never logged.</div>',
-        unsafe_allow_html=True,
-    )
-
-
-# ── Init state ────────────────────────────────────────────────────────────────
-_init_state(alloc)
-
-# ── Header ────────────────────────────────────────────────────────────────────
-mode_badge = (
-    '<span class="mode-testnet">🌐 TESTNET</span>'
-    if is_testnet else
-    '<span class="mode-paper">📄 PAPER</span>'
-)
-st.markdown(
-    f'<h1 style="font-size:34px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">'
-    f'⚡ NexusQuant <span style="color:#6366f1;">Alpha Arena</span> '
-    f'{mode_badge}</h1>'
-    f'<p style="color:#374151;font-size:14px;margin-bottom:20px;">'
-    f'Three <b style="color:#818cf8;">Gemma 4</b> personas · '
-    f'Trend · Mean-Reversion · Conservative</p>',
-    unsafe_allow_html=True,
-)
-
-# ── Global metrics ────────────────────────────────────────────────────────────
-m1, m2, m3, m4 = st.columns(4)
-price  = st.session_state.last_price
-tick_s = st.session_state.last_tick_s
-m1.metric("Total Capital",    f"${total_capital:,.2f}")
-m2.metric("Simulation Ticks", st.session_state.tick_count)
-m3.metric("Last BTC Price",   f"${price:,.2f}" if price else "—")
-m4.metric("Last Tick",        f"{tick_s:.1f}s" if tick_s else "—")
-
-st.markdown("---")
-
-# ── Run button ────────────────────────────────────────────────────────────────
-btn_col, info_col = st.columns([1, 3])
-with btn_col:
-    run_clicked = st.button("▶  Run Simulation Tick", key="run_tick")
-with info_col:
-    st.markdown(
-        '<div style="padding:12px 0;color:#374151;font-size:13px;">'
-        '🔗 Fetches live OHLCV → FeatureEngineer → '
-        'DimmerForce + Zenith + Aegis (all Gemma 4) in sequence.</div>',
-        unsafe_allow_html=True,
-    )
-
-# ── Tick execution ────────────────────────────────────────────────────────────
-if run_clicked:
+# ── Core tick logic ────────────────────────────────────────────────────────────
+def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
+    """Runs one full pipeline tick: fetch → enrich → signal → execute."""
+    MarketDataFetcher, FeatureEngineer, DimmerForceAgent, ZenithAgent, AegisAgent = _load_pipeline()
     t0 = time.time()
-    MarketDataFetcher, FeatureEngineer, DimmerForceAgent, ZenithAgent, AegisAgent = (
-        _load_pipeline()
-    )
 
-    with st.spinner(f"Fetching {candle_limit} candles of {symbol} [{timeframe}]…"):
+    # 1. Fetch & enrich
+    try:
+        raw_df = MarketDataFetcher().fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=candle_limit)
+        enriched_df = FeatureEngineer().add_technical_indicators(raw_df)
+        st.session_state.enriched_df = enriched_df
+        st.session_state.last_price = float(enriched_df["close"].iloc[-1])
+        _log(f"Fetched {len(enriched_df)} candles. Close=${st.session_state.last_price:,.2f}", "info")
+    except Exception as exc:
+        _log(f"Data fetch failed: {exc}", "err")
+        st.session_state.last_tick_s = time.time() - t0
+        return
+
+    # 2. Agent signals
+    agents_map = {"DimmerForce": DimmerForceAgent(), "Zenith": ZenithAgent(), "Aegis": AegisAgent()}
+    enriched_df = st.session_state.enriched_df
+    for name, agent in agents_map.items():
         try:
-            raw_df = MarketDataFetcher().fetch_ohlcv(
-                symbol=symbol, timeframe=timeframe, limit=candle_limit,
-            )
-            enriched_df = FeatureEngineer().add_technical_indicators(raw_df)
-            st.session_state.last_price  = float(enriched_df["close"].iloc[-1])
-            st.session_state.enriched_df = enriched_df
+            sig = agent.generate_signal(enriched_df)
+            st.session_state.signals[name] = sig
+            st.session_state.errors[name] = None
+            _log(f"[{name}] → {sig['action']} ({int(sig['confidence']*100)}%): {sig['reason'][:60]}",
+                 "buy" if sig["action"]=="BUY" else "sell" if sig["action"]=="SELL" else "info")
         except Exception as exc:
-            st.error(f"❌ Data fetch failed: {exc}")
-            st.stop()
+            st.session_state.signals[name] = None
+            st.session_state.errors[name] = str(exc)
+            _log(f"[{name}] agent error: {exc}", "err")
 
-    agents_map = {
-        "DimmerForce": DimmerForceAgent(),
-        "Zenith":      ZenithAgent(),
-        "Aegis":       AegisAgent(),
-    }
-
-    for agent_name, agent_obj in agents_map.items():
-        with st.spinner(f"[{agent_name}] Querying Gemma 4…"):
-            try:
-                sig = agent_obj.generate_signal(enriched_df)
-                st.session_state.signals[agent_name] = sig
-                st.session_state.errors[agent_name]  = None
-            except Exception as exc:
-                st.session_state.signals[agent_name] = None
-                st.session_state.errors[agent_name]  = str(exc)
+    # 3. Execute order via DimmerForce signal
+    exec_signal = st.session_state.signals.get(EXEC_AGENT)
+    if exec_signal:
+        _execute_testnet_order(exec_signal, symbol)
 
     st.session_state.tick_count += 1
     st.session_state.last_tick_s = time.time() - t0
-    st.rerun()
+    _log(f"Tick #{st.session_state.tick_count} complete in {st.session_state.last_tick_s:.1f}s", "info")
 
-# ── Agent columns ─────────────────────────────────────────────────────────────
-col_d, col_z, col_a = st.columns(3)
-col_map = {"DimmerForce": col_d, "Zenith": col_z, "Aegis": col_a}
 
-for agent_name, col in col_map.items():
-    meta    = AGENT_META[agent_name]
-    signal  = st.session_state.signals.get(agent_name)
-    error   = st.session_state.errors.get(agent_name)
-    balance = st.session_state.balances.get(agent_name, alloc[agent_name])
+def _execute_testnet_order(signal: dict, symbol: str) -> None:
+    """Translates a DimmerForce signal into a testnet order."""
+    from src.execution.broker import BrokerError
+    from src.execution.risk_manager import RiskManager
 
-    with col:
+    action = signal.get("action", "HOLD")
+    if action == "HOLD":
+        _log(f"[{EXEC_AGENT}] HOLD — no order placed.", "info")
+        return
+
+    try:
+        broker = _get_broker()
+        current_price = st.session_state.last_price or 0.0
+
+        if action == "BUY":
+            usdt_balance = broker.get_free_balance("USDT")
+            enriched_df = st.session_state.enriched_df
+            atr = float(enriched_df["ATRr_14"].iloc[-1]) if enriched_df is not None else 0.0
+
+            if usdt_balance < 10.0:
+                _log(f"[{EXEC_AGENT}] BUY skipped — USDT balance too low ({usdt_balance:.2f})", "err")
+                return
+
+            rm = RiskManager()
+            metrics = rm.calculate_position_size(
+                signal_action="BUY",
+                current_price=current_price,
+                atr=atr if atr > 0 else current_price * 0.003,
+                available_capital=usdt_balance,
+            )
+            units = metrics.get("units", 0.0)
+            if units <= 0:
+                _log(f"[{EXEC_AGENT}] BUY skipped — RiskManager returned 0 units.", "err")
+                return
+
+            _log(f"[{EXEC_AGENT}] Placing MARKET BUY {units:.8f} {symbol} @ ~${current_price:,.2f}", "buy")
+            order = broker.execute_order(symbol=symbol, side="buy", amount=units)
+            _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "buy")
+
+        elif action == "SELL":
+            base_ticker = symbol.split("/")[0]  # e.g. "BTC"
+            btc_balance = broker.get_free_balance(base_ticker)
+            if btc_balance <= 0.0:
+                _log(f"[{EXEC_AGENT}] SELL skipped — no {base_ticker} balance to sell.", "err")
+                return
+
+            _log(f"[{EXEC_AGENT}] Placing MARKET SELL {btc_balance:.8f} {symbol}", "sell")
+            order = broker.execute_order(symbol=symbol, side="sell", amount=btc_balance)
+            _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "sell")
+
+    except BrokerError as exc:
+        _log(f"[{EXEC_AGENT}] Broker error: {exc}", "err")
+    except Exception as exc:
+        _log(f"[{EXEC_AGENT}] Unexpected execution error: {exc}", "err")
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚡ NexusQuant")
+    st.markdown('<div style="color:#374151;font-size:12px;margin-bottom:16px;">Alpha Arena · v0.7 · Session Trading</div>',
+                unsafe_allow_html=True)
+
+    # Strict mode indicator — no toggle
+    st.markdown('<div class="mode-badge">🌐 BINANCE TESTNET</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:11px;color:#374151;margin:8px 0 16px;">Orders route to testnet.binance.vision<br>Keys loaded from local .env</div>',
+                unsafe_allow_html=True)
+
+    # Balance check
+    if st.button("🔍 Check Testnet Balance", key="check_bal"):
+        with st.spinner("Connecting…"):
+            try:
+                b = _get_broker()
+                u = b.get_free_balance("USDT")
+                c = b.get_free_balance("BTC")
+                st.session_state.testnet_balance = {"USDT": u, "BTC": c}
+                st.success(f"USDT: {u:,.4f}\nBTC: {c:.8f}")
+                _log(f"Balance check — USDT={u:,.4f}  BTC={c:.8f}", "info")
+            except Exception as exc:
+                st.error(f"Connection failed: {exc}")
+
+    st.markdown("---")
+    st.markdown("### ⚙️ Market Settings")
+    symbol       = st.selectbox("Trading Pair", ["BTC/USDT","ETH/USDT","SOL/USDT"])
+    timeframe    = st.selectbox("Timeframe", ["1h","15m","4h"])
+    candle_limit = st.slider("Candles", 60, 300, 100, step=10)
+
+    st.markdown("### ⏱️ Session Settings")
+    session_hours   = st.number_input("Duration (Hours)",  min_value=0.1, max_value=24.0, value=4.0, step=0.5)
+    tick_interval_s = st.number_input("Tick Interval (s)", min_value=30,  max_value=3600,  value=300, step=30)
+
+    st.markdown("---")
+    if st.session_state.testnet_balance:
+        b = st.session_state.testnet_balance
+        st.markdown(f'<div style="font-size:12px;color:#374151;">💰 USDT: <b style="color:#60a5fa;">{b["USDT"]:,.2f}</b><br>'
+                    f'₿ BTC: <b style="color:#fbbf24;">{b["BTC"]:.8f}</b></div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="font-size:10px;color:#1f2937;margin-top:12px;line-height:1.7;">'
+                f'⚡ Exec Agent: <b>{EXEC_AGENT}</b><br>'
+                '📊 Advisory: Zenith, Aegis<br>'
+                '🔒 Keys from .env — never logged</div>', unsafe_allow_html=True)
+
+
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown('<h1 style="font-size:32px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">'
+            '⚡ NexusQuant <span style="color:#6366f1;">Alpha Arena</span> '
+            '<span class="mode-badge" style="font-size:14px;">🌐 TESTNET</span></h1>'
+            '<p style="color:#374151;font-size:13px;margin-bottom:20px;">'
+            'Session-based live trading · Gemma 4 × 3 personas · '
+            f'Execution: <b style="color:#818cf8;">{EXEC_AGENT}</b> · '
+            'Advisory: <b style="color:#34d399;">Zenith</b> + <b style="color:#f472b6;">Aegis</b></p>',
+            unsafe_allow_html=True)
+
+# ── Global metrics row ─────────────────────────────────────────────────────────
+elapsed = _elapsed_s()
+remaining = max(0, session_hours * 3600 - elapsed)
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Session Status", "🟢 ACTIVE" if st.session_state.session_active else "⭕ IDLE")
+m2.metric("Ticks Completed", st.session_state.tick_count)
+m3.metric("Last BTC Price", f"${st.session_state.last_price:,.2f}" if st.session_state.last_price else "—")
+m4.metric("Time Elapsed", f"{int(elapsed//60)}m {int(elapsed%60)}s" if st.session_state.session_active else "—")
+m5.metric("Time Remaining", f"{int(remaining//60)}m {int(remaining%60)}s" if st.session_state.session_active else "—")
+
+st.markdown("---")
+
+# ── Session control ────────────────────────────────────────────────────────────
+ctrl_left, ctrl_right = st.columns([2, 3])
+
+with ctrl_left:
+    if not st.session_state.session_active:
+        # ── START form ───────────────────────────────────────────────────────
+        st.markdown('<div style="background:#0e1628;border:1px solid #1e3a5f;border-radius:14px;padding:20px;">'
+                    '<div style="font-size:13px;font-weight:600;color:#60a5fa;margin-bottom:14px;'
+                    'text-transform:uppercase;letter-spacing:1px;">🚀 Start Trading Session</div>',
+                    unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:12px;color:#374151;margin-bottom:4px;">'
+                    f'Duration: <b style="color:#e2e8f0;">{session_hours}h</b> · '
+                    f'Tick every: <b style="color:#e2e8f0;">{tick_interval_s}s</b><br>'
+                    f'Symbol: <b style="color:#e2e8f0;">{symbol}</b> · '
+                    f'TF: <b style="color:#e2e8f0;">{timeframe}</b></div>',
+                    unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("▶  Start Trading Session", key="start_session"):
+            try:
+                _get_broker()   # validate keys before starting
+                st.session_state.session_active     = True
+                st.session_state.session_start_ts   = time.time()
+                st.session_state.session_duration_h = session_hours
+                st.session_state.tick_interval_s    = tick_interval_s
+                st.session_state.tick_count         = 0
+                st.session_state.order_log          = []
+                _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
+                     f"symbol={symbol}  agent={EXEC_AGENT}", "info")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid testnet keys.")
+    else:
+        # ── ACTIVE session status ────────────────────────────────────────────
+        st.markdown(f'<div class="session-active">'
+                    f'🟢 SESSION ACTIVE<br>'
+                    f'<span style="font-size:12px;font-weight:400;">'
+                    f'Tick #{st.session_state.tick_count} · '
+                    f'{int(remaining//60)}m {int(remaining%60)}s remaining</span></div>',
+                    unsafe_allow_html=True)
+
+        # Progress bar
+        progress = min(1.0, elapsed / (session_hours * 3600)) if session_hours > 0 else 0
+        st.progress(progress)
+
+        st.markdown('<div class="stop-btn">', unsafe_allow_html=True)
+        if st.button("⏹  STOP SESSION", key="stop_session"):
+            st.session_state.session_active = False
+            st.session_state.broker = None   # reset broker so next session gets fresh instance
+            _log("Session stopped by user.", "err")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+with ctrl_right:
+    # ── Live order log ───────────────────────────────────────────────────────
+    st.markdown('<div style="font-size:10px;font-weight:600;color:#374151;'
+                'text-transform:uppercase;letter-spacing:2px;margin-bottom:8px;">'
+                '📋 Live Execution Log</div>', unsafe_allow_html=True)
+    log_html = "".join(st.session_state.order_log[:40]) if st.session_state.order_log else (
+        '<div class="log-entry log-info">No activity yet. Start a session to begin.</div>'
+    )
+    st.markdown(f'<div style="background:#070d1a;border:1px solid #1a2740;border-radius:10px;'
+                f'padding:14px;height:220px;overflow-y:auto;">{log_html}</div>',
+                unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ── Agent signal columns ───────────────────────────────────────────────────────
+agent_cols = st.columns(3)
+agent_names = list(AGENT_META.keys())
+
+for i, agent_name in enumerate(agent_names):
+    meta   = AGENT_META[agent_name]
+    signal = st.session_state.signals.get(agent_name)
+    error  = st.session_state.errors.get(agent_name)
+    is_exec = meta["executes"]
+
+    with agent_cols[i]:
+        exec_label = ' <span style="font-size:10px;background:#1e3a5f;color:#60a5fa;padding:2px 8px;border-radius:10px;">EXECUTES</span>' if is_exec else ' <span style="font-size:10px;background:#1c1208;color:#fbbf24;padding:2px 8px;border-radius:10px;">ADVISORY</span>'
         st.markdown(
-            f'<div class="agent-card {meta["card_class"]}">'
-            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
-            f'<span style="font-size:30px;">{meta["icon"]}</span>'
-            f'<div class="agent-name">{agent_name}</div></div>'
-            f'<span class="persona-tag {meta["persona_class"]}">{meta["persona"]}</span><br>'
-            f'<div style="font-size:11px;color:#374151;margin-bottom:14px;">{meta["description"]}</div>'
-            f'<div class="metric-label">Paper Balance</div>'
-            f'<div class="big-metric" style="color:{meta["balance_color"]};">${balance:,.2f}</div>'
-            f'<div style="font-size:11px;color:#1f2937;margin-top:2px;margin-bottom:14px;">'
-            f'Allocated: ${alloc[agent_name]:,.2f} USDT</div>'
-            f'<hr style="border:none;border-top:1px solid #111827;margin:10px 0 12px 0;">'
-            f'<div style="font-size:10px;font-weight:600;color:{meta["color"]};'
-            f'text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">Latest Signal</div>'
-            f'</div>',
+            f'<div class="agent-card {meta["card"]}">'
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
+            f'<span style="font-size:26px;">{meta["icon"]}</span>'
+            f'<div><div style="font-size:17px;font-weight:700;color:#e2e8f0;">{agent_name}{exec_label}</div>'
+            f'<div style="font-size:10px;color:#374151;text-transform:uppercase;letter-spacing:1px;">{meta["persona"]}</div>'
+            f'</div></div>',
             unsafe_allow_html=True,
         )
-        _render_signal_card(signal, error, meta)
 
-        if signal and st.session_state.enriched_df is not None:
-            with st.expander("📊 Market snapshot", expanded=False):
-                df = st.session_state.enriched_df
-                cols_show = [c for c in
-                             ["close", "RSI_14", "MACD_12_26_9",
-                              "MACDh_12_26_9", "EMA_20", "EMA_50", "ATRr_14"]
-                             if c in df.columns]
-                st.dataframe(df[cols_show].tail(5).round(4), use_container_width=True)
+        if error:
+            st.markdown(f'<div class="err-box">⚠️ {error}</div>', unsafe_allow_html=True)
+        elif signal is None:
+            st.markdown('<div style="color:#374151;font-size:12px;padding:8px 0;">Awaiting first tick…</div>',
+                        unsafe_allow_html=True)
+        else:
+            action = signal.get("action","HOLD")
+            conf   = float(signal.get("confidence", 0.0))
+            reason = signal.get("reason","—")
+            conf_color = "#34d399" if conf>=0.7 else "#fbbf24" if conf>=0.5 else "#f87171"
+            st.markdown(_badge(action), unsafe_allow_html=True)
+            st.markdown(_conf_bar(conf), unsafe_allow_html=True)
+            st.markdown(f'<div class="reason-box">💬 {reason}</div>', unsafe_allow_html=True)
 
-# ── Signal comparison matrix ──────────────────────────────────────────────────
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ── Comparison matrix ──────────────────────────────────────────────────────────
 if any(s is not None for s in st.session_state.signals.values()):
     st.markdown("---")
-    st.markdown(
-        '<div style="font-size:10px;font-weight:600;color:#374151;'
-        'text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;">'
-        'Signal Comparison Matrix</div>',
-        unsafe_allow_html=True,
-    )
-    cmp_cols = st.columns(3)
-    for i, (agent_name, meta) in enumerate(AGENT_META.items()):
-        sig = st.session_state.signals.get(agent_name)
-        with cmp_cols[i]:
+    st.markdown('<div style="font-size:10px;font-weight:600;color:#374151;text-transform:uppercase;'
+                'letter-spacing:2px;margin-bottom:10px;">Consensus Matrix</div>', unsafe_allow_html=True)
+    cm_cols = st.columns(3)
+    for i, (name, meta) in enumerate(AGENT_META.items()):
+        sig = st.session_state.signals.get(name)
+        with cm_cols[i]:
             if sig:
-                action = sig.get("action", "—")
+                action = sig.get("action","—")
                 conf   = sig.get("confidence", 0.0)
-                color  = {"BUY": "#34d399", "SELL": "#f87171"}.get(action, "#fbbf24")
+                color  = {"BUY":"#34d399","SELL":"#f87171"}.get(action,"#fbbf24")
                 st.markdown(
-                    f'<div style="text-align:center;padding:14px;background:#0a101e;'
-                    f'border-radius:12px;border:1px solid #1a2740;">'
-                    f'<div style="font-size:12px;color:#374151;font-weight:600;">{agent_name}</div>'
-                    f'<div style="font-size:26px;font-weight:800;color:{color};'
-                    f'font-family:monospace;margin:6px 0;">{action}</div>'
-                    f'<div style="font-size:13px;color:#4b5563;">{int(conf*100)}% confidence</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                    f'<div style="text-align:center;padding:12px;background:#0a101e;'
+                    f'border-radius:10px;border:1px solid #1a2740;">'
+                    f'<div style="font-size:11px;color:#374151;">{name}</div>'
+                    f'<div style="font-size:24px;font-weight:800;color:{color};font-family:monospace;">{action}</div>'
+                    f'<div style="font-size:12px;color:#4b5563;">{int(conf*100)}%</div></div>',
+                    unsafe_allow_html=True)
 
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    '<div style="text-align:center;font-size:11px;color:#111827;padding:6px 0;">'
-    'NexusQuant Alpha Arena · Paper Trading / Testnet Only · Not Financial Advice · '
-    'Powered by Gemma 4 (local Ollama)</div>',
-    unsafe_allow_html=True,
-)
+# ── Session loop: sleep then rerun ────────────────────────────────────────────
+if st.session_state.session_active:
+    if _session_expired():
+        st.session_state.session_active = False
+        st.session_state.broker = None
+        _log(f"Session ended — {st.session_state.tick_count} ticks completed.", "info")
+        st.warning(f"✅ Session complete — {st.session_state.tick_count} ticks executed.")
+        st.rerun()
+    else:
+        _run_tick(symbol, timeframe, candle_limit)
+        with st.spinner(f"Next tick in {st.session_state.tick_interval_s}s…"):
+            time.sleep(st.session_state.tick_interval_s)
+        st.rerun()
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
+st.markdown('<div style="text-align:center;font-size:11px;color:#111827;padding:8px 0;">'
+            'NexusQuant Alpha Arena · Binance Testnet · Not Financial Advice</div>',
+            unsafe_allow_html=True)

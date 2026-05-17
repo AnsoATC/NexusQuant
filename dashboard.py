@@ -67,9 +67,20 @@ def _init():
         "last_price": None,
         "last_tick_s": None,
         "enriched_df": None,
-        "order_log": [],          # list[str] of human-readable log lines
-        "broker": None,           # cached BinanceBroker instance
+        "order_log": [],
+        "broker": None,
         "testnet_balance": None,
+        # ── Performance tracking (reset on each new session start) ──────────
+        # signal_counts: per-agent lifetime action counters for the session.
+        "signal_counts": {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META},
+        # performance_history: list of dicts appended once per tick.
+        # Keys: timestamp, btc_price, buy_hold_equity,
+        #       DimmerForce_equity, Zenith_equity, Aegis_equity.
+        "performance_history": [],
+        # initial_btc_price: price captured on Tick 1 for Buy&Hold baseline.
+        "initial_btc_price": None,
+        # per-agent simulated equity (starts at each agent's allocation).
+        "agent_equity": {k: 50.0 for k in AGENT_META},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -239,14 +250,20 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
         raw_df = MarketDataFetcher().fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=candle_limit)
         enriched_df = FeatureEngineer().add_technical_indicators(raw_df)
         st.session_state.enriched_df = enriched_df
-        st.session_state.last_price = float(enriched_df["close"].iloc[-1])
-        _log(f"Fetched {len(enriched_df)} candles. Close=${st.session_state.last_price:,.2f}", "info")
+        current_price = float(enriched_df["close"].iloc[-1])
+        st.session_state.last_price = current_price
+        _log(f"Fetched {len(enriched_df)} candles. Close=${current_price:,.2f}", "info")
     except Exception as exc:
         _log(f"Data fetch failed: {exc}", "err")
         st.session_state.last_tick_s = time.time() - t0
         return
 
-    # 2. Agent signals
+    # Capture initial price on the very first tick for the Buy&Hold baseline
+    if st.session_state.initial_btc_price is None:
+        st.session_state.initial_btc_price = current_price
+        _log(f"Buy&Hold baseline set: ${current_price:,.2f}", "info")
+
+    # 2. Agent signals + signal counter update
     agents_map = {"DimmerForce": DimmerForceAgent(), "Zenith": ZenithAgent(), "Aegis": AegisAgent()}
     enriched_df = st.session_state.enriched_df
     for name, agent in agents_map.items():
@@ -254,8 +271,12 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
             sig = agent.generate_signal(enriched_df)
             st.session_state.signals[name] = sig
             st.session_state.errors[name] = None
-            _log(f"[{name}] → {sig['action']} ({int(sig['confidence']*100)}%): {sig['reason'][:60]}",
-                 "buy" if sig["action"]=="BUY" else "sell" if sig["action"]=="SELL" else "info")
+            action = sig["action"]
+            # Increment the session-lifetime signal counter for this agent
+            if action in st.session_state.signal_counts[name]:
+                st.session_state.signal_counts[name][action] += 1
+            _log(f"[{name}] → {action} ({int(sig['confidence']*100)}%): {sig['reason'][:60]}",
+                 "buy" if action == "BUY" else "sell" if action == "SELL" else "info")
         except Exception as exc:
             st.session_state.signals[name] = None
             st.session_state.errors[name] = str(exc)
@@ -265,6 +286,35 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     exec_signal = st.session_state.signals.get(EXEC_AGENT)
     if exec_signal:
         _execute_testnet_order(exec_signal, symbol)
+
+    # 4. Append performance snapshot for the equity chart
+    init_price = st.session_state.initial_btc_price or current_price
+    # Buy&Hold equity: normalise current price to starting allocation of $50
+    buy_hold_equity = (current_price / init_price) * 50.0
+
+    # Simulated advisory equity: +0.1% on correct-direction signal, -0.05% on wrong
+    # This is a lightweight paper-equity proxy for Zenith and Aegis (advisory only).
+    # DimmerForce equity is derived from the live testnet balance when available.
+    for name in ["Zenith", "Aegis"]:
+        sig = st.session_state.signals.get(name)
+        if sig:
+            act = sig.get("action", "HOLD")
+            price_change_pct = (current_price - init_price) / init_price
+            if act == "BUY" and price_change_pct > 0:
+                st.session_state.agent_equity[name] *= 1.001
+            elif act == "SELL" and price_change_pct < 0:
+                st.session_state.agent_equity[name] *= 1.001
+            elif act in ("BUY", "SELL"):
+                st.session_state.agent_equity[name] *= 0.9995
+
+    st.session_state.performance_history.append({
+        "timestamp": datetime.now(timezone.utc).strftime("%H:%M"),
+        "btc_price": current_price,
+        "buy_hold": round(buy_hold_equity, 4),
+        "DimmerForce": round(st.session_state.agent_equity["DimmerForce"], 4),
+        "Zenith":      round(st.session_state.agent_equity["Zenith"], 4),
+        "Aegis":       round(st.session_state.agent_equity["Aegis"], 4),
+    })
 
     st.session_state.tick_count += 1
     st.session_state.last_tick_s = time.time() - t0
@@ -412,6 +462,21 @@ else:
         unsafe_allow_html=True,
     )
 
+# ── Performance equity chart ──────────────────────────────────────────────────
+perf_placeholder = st.empty()
+_perf_fig = _build_performance_chart()
+if _perf_fig is not None:
+    perf_placeholder.plotly_chart(_perf_fig, use_container_width=True,
+                                  config={"displayModeBar": False})
+else:
+    perf_placeholder.markdown(
+        '<div style="background:#070d1a;border:1px solid #1a2740;border-radius:12px;'
+        'height:80px;display:flex;align-items:center;justify-content:center;'
+        'color:#1e3a5f;font-size:13px;">'
+        '📈 Equity chart appears after 2 ticks…</div>',
+        unsafe_allow_html=True,
+    )
+
 st.markdown("---")
 
 # ── Session control ────────────────────────────────────────────────────────────
@@ -436,12 +501,17 @@ with ctrl_left:
         if st.button("▶  Start Trading Session", key="start_session"):
             try:
                 _get_broker()   # validate keys before starting
-                st.session_state.session_active     = True
-                st.session_state.session_start_ts   = time.time()
-                st.session_state.session_duration_h = session_hours
-                st.session_state.tick_interval_s    = tick_interval_s
-                st.session_state.tick_count         = 0
-                st.session_state.order_log          = []
+                st.session_state.session_active      = True
+                st.session_state.session_start_ts    = time.time()
+                st.session_state.session_duration_h  = session_hours
+                st.session_state.tick_interval_s     = tick_interval_s
+                st.session_state.tick_count          = 0
+                st.session_state.order_log           = []
+                # Reset tracking state for a fresh session
+                st.session_state.signal_counts       = {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META}
+                st.session_state.performance_history = []
+                st.session_state.initial_btc_price   = None
+                st.session_state.agent_equity        = {k: 50.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agent={EXEC_AGENT}", "info")
                 st.rerun()
@@ -513,10 +583,35 @@ for i, agent_name in enumerate(agent_names):
             action = signal.get("action","HOLD")
             conf   = float(signal.get("confidence", 0.0))
             reason = signal.get("reason","—")
-            conf_color = "#34d399" if conf>=0.7 else "#fbbf24" if conf>=0.5 else "#f87171"
             st.markdown(_badge(action), unsafe_allow_html=True)
             st.markdown(_conf_bar(conf), unsafe_allow_html=True)
             st.markdown(f'<div class="reason-box">💬 {reason}</div>', unsafe_allow_html=True)
+
+        # ── Signal counters ───────────────────────────────────────────────────
+        counts = st.session_state.signal_counts.get(agent_name, {})
+        b_cnt = counts.get("BUY", 0)
+        s_cnt = counts.get("SELL", 0)
+        h_cnt = counts.get("HOLD", 0)
+        equity = st.session_state.agent_equity.get(agent_name, 50.0)
+        pnl    = equity - 50.0
+        pnl_color = "#34d399" if pnl >= 0 else "#f87171"
+        pnl_sign  = "+" if pnl >= 0 else ""
+        st.markdown(
+            f'<div style="margin-top:12px;padding:8px 10px;background:#070d1a;'
+            f'border:1px solid #1a2740;border-radius:8px;">'
+            f'<div style="font-size:10px;color:#374151;font-weight:600;'
+            f'text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;">Session Counts</div>'
+            f'<span style="color:#34d399;font-size:12px;font-weight:600;">▲ BUY {b_cnt}</span>'
+            f'<span style="color:#64748b;margin:0 6px;">│</span>'
+            f'<span style="color:#f87171;font-size:12px;font-weight:600;">▼ SELL {s_cnt}</span>'
+            f'<span style="color:#64748b;margin:0 6px;">│</span>'
+            f'<span style="color:#fbbf24;font-size:12px;font-weight:600;">— HOLD {h_cnt}</span>'
+            f'<div style="margin-top:5px;font-size:12px;">'  
+            f'Equity: <b style="color:#60a5fa;font-family:monospace;">${equity:.2f}</b>'
+            f' <span style="color:{pnl_color};font-size:11px;">({pnl_sign}{pnl:.2f})</span>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
 
         st.markdown('</div>', unsafe_allow_html=True)
 

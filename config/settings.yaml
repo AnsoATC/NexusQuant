@@ -22,9 +22,13 @@ exchange:
   timeout_ms: 30000            # Request timeout in milliseconds
 
 risk:
-  max_position_size_usdt: 100.0
-  max_drawdown_percent: 5.0
-  max_open_trades: 3
+  starting_capital_usdt: 100.0      # Simulated paper-trading starting balance
+  max_position_size_usdt: 100.0     # Hard cap on single position cost in USDT
+  risk_per_trade_percent: 2.0       # % of available capital risked per trade
+  atr_stop_loss_multiplier: 1.5     # Stop-loss = entry_price - (multiplier * ATR)
+  risk_reward_ratio: 2.0            # Take-profit distance = SL_distance * ratio
+  max_drawdown_percent: 5.0         # Maximum allowed portfolio drawdown before halting
+  max_open_trades: 3                # Maximum concurrent open positions
 
 llm:
   model: "gemma3:4b"

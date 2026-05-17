@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="NexusQuant · Alpha Arena", page_icon="⚡",
@@ -118,6 +119,113 @@ def _elapsed_s() -> float:
 
 def _session_expired() -> bool:
     return _elapsed_s() >= st.session_state.session_duration_h * 3600
+
+
+def _build_candlestick_chart(symbol: str) -> go.Figure | None:
+    """Builds a dark-themed Plotly candlestick figure with EMA_20 and EMA_50 overlays.
+
+    Returns None when no enriched DataFrame is available yet (pre-first-tick).
+
+    Args:
+        symbol: Trading pair label used as the chart title (e.g. ``"BTC/USDT"``).
+
+    Returns:
+        A configured :class:`plotly.graph_objects.Figure`, or ``None``.
+    """
+    df = st.session_state.enriched_df
+    if df is None or df.empty:
+        return None
+
+    # Use the last 60 candles for readability — keep the chart uncluttered
+    plot_df = df.tail(60).copy()
+    timestamps = plot_df.index.astype(str).str[:19]  # trim timezone noise
+
+    fig = go.Figure()
+
+    # ── Candlestick body ──────────────────────────────────────────────────────
+    fig.add_trace(go.Candlestick(
+        x=timestamps,
+        open=plot_df["open"],
+        high=plot_df["high"],
+        low=plot_df["low"],
+        close=plot_df["close"],
+        name=symbol,
+        increasing_line_color="#34d399",
+        decreasing_line_color="#f87171",
+        increasing_fillcolor="rgba(52,211,153,0.25)",
+        decreasing_fillcolor="rgba(248,113,113,0.25)",
+        whiskerwidth=0.4,
+    ))
+
+    # ── EMA_20 overlay ────────────────────────────────────────────────────────
+    if "EMA_20" in plot_df.columns:
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=plot_df["EMA_20"],
+            mode="lines", name="EMA 20",
+            line=dict(color="#818cf8", width=1.5, dash="solid"),
+        ))
+
+    # ── EMA_50 overlay ────────────────────────────────────────────────────────
+    if "EMA_50" in plot_df.columns:
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=plot_df["EMA_50"],
+            mode="lines", name="EMA 50",
+            line=dict(color="#f472b6", width=1.5, dash="dot"),
+        ))
+
+    # ── RSI subplot via secondary y-axis ─────────────────────────────────────
+    if "RSI_14" in plot_df.columns:
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=plot_df["RSI_14"],
+            mode="lines", name="RSI 14",
+            line=dict(color="#fbbf24", width=1.2),
+            yaxis="y2",
+        ))
+        # Overbought / oversold reference lines
+        for level, color in [(70, "rgba(248,113,113,0.3)"), (30, "rgba(52,211,153,0.3)")]:
+            fig.add_hline(y=level, line_color=color, line_dash="dash",
+                          line_width=1, yref="y2")
+
+    # ── Dark layout ───────────────────────────────────────────────────────────
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{symbol}</b> · Last 60 Candles · EMA 20 / 50 overlaid",
+            font=dict(color="#94a3b8", size=13),
+            x=0.01,
+        ),
+        paper_bgcolor="#070d1a",
+        plot_bgcolor="#0a1020",
+        font=dict(color="#64748b", family="Inter"),
+        xaxis=dict(
+            gridcolor="#1a2740", showgrid=True,
+            rangeslider=dict(visible=False),
+            tickfont=dict(size=10),
+        ),
+        yaxis=dict(
+            gridcolor="#1a2740", showgrid=True,
+            title=dict(text="Price (USDT)", font=dict(size=11)),
+            tickfont=dict(size=10),
+            side="left",
+        ),
+        yaxis2=dict(
+            title=dict(text="RSI", font=dict(size=11)),
+            overlaying="y", side="right",
+            range=[0, 100],
+            showgrid=False,
+            tickfont=dict(size=10),
+        ),
+        legend=dict(
+            bgcolor="rgba(10,16,32,0.8)",
+            bordercolor="#1a2740",
+            borderwidth=1,
+            font=dict(size=11),
+            x=0.01, y=0.99,
+        ),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+    )
+
+    return fig
 
 
 # ── Core tick logic ────────────────────────────────────────────────────────────
@@ -245,7 +353,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ⚙️ Market Settings")
-    symbol       = st.selectbox("Trading Pair", ["BTC/USDT","ETH/USDT","SOL/USDT"])
+    symbol       = st.selectbox(
+        "Trading Pair",
+        ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT"],
+    )
     timeframe    = st.selectbox("Timeframe", ["1h","15m","4h"])
     candle_limit = st.slider("Candles", 60, 300, 100, step=10)
 
@@ -284,6 +395,22 @@ m2.metric("Ticks Completed", st.session_state.tick_count)
 m3.metric("Last BTC Price", f"${st.session_state.last_price:,.2f}" if st.session_state.last_price else "—")
 m4.metric("Time Elapsed", f"{int(elapsed//60)}m {int(elapsed%60)}s" if st.session_state.session_active else "—")
 m5.metric("Time Remaining", f"{int(remaining//60)}m {int(remaining%60)}s" if st.session_state.session_active else "—")
+
+st.markdown("---")
+
+# ── Live candlestick chart ─────────────────────────────────────────────────────
+chart_placeholder = st.empty()
+_fig = _build_candlestick_chart(symbol)
+if _fig is not None:
+    chart_placeholder.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+else:
+    chart_placeholder.markdown(
+        '<div style="background:#070d1a;border:1px solid #1a2740;border-radius:12px;'
+        'height:120px;display:flex;align-items:center;justify-content:center;'
+        'color:#1e3a5f;font-size:13px;">'
+        '📊 Candlestick chart loads after the first session tick…</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 

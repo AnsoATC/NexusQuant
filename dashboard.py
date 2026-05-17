@@ -239,7 +239,85 @@ def _build_candlestick_chart(symbol: str) -> go.Figure | None:
     return fig
 
 
+def _build_performance_chart() -> go.Figure | None:
+    """Builds the agent PnL equity curve chart with a Buy&Hold market baseline.
+
+    Returns:
+        A :class:`plotly.graph_objects.Figure` with 4 lines (3 agents + baseline),
+        or ``None`` when fewer than 2 ticks have been recorded.
+    """
+    history = st.session_state.performance_history
+    if len(history) < 2:
+        return None
+
+    timestamps   = [h["timestamp"]  for h in history]
+    buy_hold     = [h["buy_hold"]   for h in history]
+    df_equity    = [h["DimmerForce"] for h in history]
+    zen_equity   = [h["Zenith"]     for h in history]
+    aegis_equity = [h["Aegis"]      for h in history]
+
+    fig = go.Figure()
+
+    # ── Agent equity lines + Buy&Hold baseline ────────────────────────────────
+    traces = [
+        ("DimmerForce", df_equity,    "#818cf8", "solid", 2.0),
+        ("Zenith",      zen_equity,   "#34d399", "solid", 1.5),
+        ("Aegis",       aegis_equity, "#f472b6", "solid", 1.5),
+        ("Buy & Hold",  buy_hold,     "#94a3b8", "dash",  1.5),
+    ]
+    for label, values, color, dash, width in traces:
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=values,
+            mode="lines",
+            name=label,
+            line=dict(color=color, width=width, dash=dash),
+        ))
+
+    # Dotted horizontal baseline at starting allocation ($50)
+    fig.add_hline(
+        y=50.0,
+        line_color="rgba(148,163,184,0.2)",
+        line_dash="dot",
+        line_width=1,
+    )
+
+    # ── Dark layout ───────────────────────────────────────────────────────────
+    fig.update_layout(
+        title=dict(
+            text="<b>Agent Equity Curves</b> · Simulated PnL vs Buy & Hold Baseline",
+            font=dict(color="#94a3b8", size=13),
+            x=0.01,
+        ),
+        paper_bgcolor="#070d1a",
+        plot_bgcolor="#0a1020",
+        font=dict(color="#64748b", family="Inter"),
+        xaxis=dict(
+            gridcolor="#1a2740", showgrid=True,
+            tickfont=dict(size=10),
+            title=dict(text="Tick Time (UTC)", font=dict(size=11)),
+        ),
+        yaxis=dict(
+            gridcolor="#1a2740", showgrid=True,
+            title=dict(text="Equity (USDT)", font=dict(size=11)),
+            tickfont=dict(size=10),
+            tickprefix="$",
+        ),
+        legend=dict(
+            bgcolor="rgba(10,16,32,0.8)",
+            bordercolor="#1a2740",
+            borderwidth=1,
+            font=dict(size=11),
+            orientation="h",
+            x=0.0, y=-0.25,
+        ),
+        margin=dict(l=10, r=10, t=40, b=50),
+        height=320,
+    )
+    return fig
+
+
 # ── Core tick logic ────────────────────────────────────────────────────────────
+
 def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     """Runs one full pipeline tick: fetch → enrich → signal → execute."""
     MarketDataFetcher, FeatureEngineer, DimmerForceAgent, ZenithAgent, AegisAgent = _load_pipeline()

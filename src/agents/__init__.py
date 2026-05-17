@@ -1,19 +1,23 @@
 """Agent package exports for NexusQuant.
 
-Exposes all concrete trading agents so they can be imported directly from
-``src.agents`` without navigating to individual sub-modules.
+Three LLM personas — all powered by Gemma 4 via Ollama, differentiated
+exclusively by their system-prompt instructions:
+
+* :class:`DimmerForceAgent` — Trend-Following (MACD + EMA primary).
+* :class:`ZenithAgent`      — Mean-Reversion / Contrarian (RSI primary).
+* :class:`AegisAgent`       — Conservative Risk-Averse (all-or-nothing HOLD).
 
 Usage::
 
-    from src.agents import DimmerForceAgent, SavinovAgent, DeepAlphaAgent
+    from src.agents import DimmerForceAgent, ZenithAgent, AegisAgent
 """
 
-from src.agents.deepalpha_bot import DeepAlphaAgent
+from src.agents.aegis import AegisAgent
 from src.agents.dimmer_force import DimmerForceAgent
-from src.agents.savinov_bot import SavinovAgent
+from src.agents.zenith import ZenithAgent
 
 __all__ = [
     "DimmerForceAgent",
-    "SavinovAgent",
-    "DeepAlphaAgent",
+    "ZenithAgent",
+    "AegisAgent",
 ]

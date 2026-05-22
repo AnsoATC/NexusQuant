@@ -90,12 +90,17 @@ class BinanceBroker:
 
         try:
             self.exchange: ccxt.binance = ccxt.binance({
-                "apiKey":      api_key,
-                "secret":      secret_key,
+                "apiKey":          api_key,
+                "secret":          secret_key,
                 "enableRateLimit": True,
                 "options": {
-                    "recvWindow": DEFAULT_RECV_WINDOW,
-                    "defaultType": "spot",
+                    "recvWindow":              DEFAULT_RECV_WINDOW,
+                    "defaultType":             "spot",
+                    # Automatically measure and compensate for the difference
+                    # between the local system clock and the Binance server time.
+                    # Prevents error -1021 (Timestamp for this request is outside
+                    # of the recvWindow) caused by local clock drift.
+                    "adjustForTimeDifference": True,
                 },
             })
 

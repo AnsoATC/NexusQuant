@@ -29,17 +29,20 @@ risk:
   starting_capital_usdt: 300.0      # Total portfolio capital across all agents
   agent_allocation_usdt: 100.0      # Capital allocated per agent
   max_position_size_usdt: 100.0     # Hard cap on single position cost in USDT
-  risk_per_trade_percent: 2.0       # % of available capital risked per trade
+  risk_per_trade_percent: 20.0       # % of available capital risked per trade
   atr_stop_loss_multiplier: 1.5     # Stop-loss = entry_price - (multiplier * ATR)
   risk_reward_ratio: 2.0            # Take-profit distance = SL_distance * ratio
-  max_drawdown_percent: 5.0         # Maximum allowed portfolio drawdown before halting
+  
+  max_drawdown_percent: 30.0        # [UPDATED] Increased to 30% to allow for the 20% risk appetite
   max_open_trades: 3                # Maximum concurrent open positions
-  # ── Lot size / precision constraints (Binance BTC/USDT defaults) ─────────
-  min_lot_size: 0.00001             # Minimum order size in base asset (BTC)
-  lot_step_size: 0.00001            # Precision step for order rounding (BTC)
+  
+  # ── Lot size & Minimums ──────────────────────────────────────────────────
+  min_notional_usdt: 5.0            # [UPDATED] Binance requires every order to be at least 5 USDT
+  min_lot_size: 0.00001             # Minimum order size in base asset (BTC specific)
+  lot_step_size: 0.00001            # Precision step for order rounding (BTC specific)
 
 llm:
-  model: "gemma3:4b"
+  model: "gemma4"                   # [UPDATED] Corrected to match your local Ollama setup
   temperature: 0.1             # Low temperature → deterministic, analytical responses
   max_tokens: 2048
   request_timeout_seconds: 120

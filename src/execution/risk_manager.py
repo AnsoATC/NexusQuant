@@ -106,18 +106,22 @@ class RiskManager:
         atr: float,
         available_capital: float,
     ) -> dict[str, Any]:
-        """Computes ATR-based position sizing for a given signal.
+        """Computes a fixed-allocation position size for a given signal.
+
+        Sizing model: **Fixed Capital Allocation**.
+        The trade spend is a fixed percentage of available capital, avoiding
+        the ATR-unit model that produces sub-minimum lot sizes on small accounts.
 
         For a **BUY** signal:
 
-        1. Stop-loss distance  = ``atr_multiplier`` × ATR
-        2. Stop-loss price     = ``current_price`` − SL distance
-        3. Risk amount (USDT)  = ``available_capital`` × ``risk_per_trade_pct`` / 100
-        4. Units to buy        = risk amount / SL distance  (risk per unit)
-        5. Cost (USDT)         = units × ``current_price``
-        6. Clamp cost to ``min(cost, available_capital, max_position_size_usdt)``
-           and recalculate units accordingly.
-        7. Take-profit price   = ``current_price`` + SL distance × ``risk_reward_ratio``
+        1. Allowed spend  = ``available_capital`` × ``risk_per_trade_pct`` / 100
+        2. Cap spend to   ``min(allowed_spend, max_position_size_usdt, available_capital)``
+        3. Raw units      = spend / ``current_price``
+        4. Truncate units to ``lot_step_size`` precision.
+        5. If truncated units < ``min_lot_size`` and capital covers it:
+               force units = ``min_lot_size`` (guarantees execution on small accounts).
+        6. Theoretical SL / TP are derived from ATR for tracking only —
+           they do **not** gate the trade size.
 
         For **SELL** or **HOLD** signals, all sizing values are zero and no
         levels are computed.
@@ -126,21 +130,16 @@ class RiskManager:
             signal_action: One of ``"BUY"``, ``"SELL"``, or ``"HOLD"``
                 (case-insensitive).
             current_price: Latest close price in USDT.
-            atr: Latest ATR value from the indicator DataFrame.
-            available_capital: Current available USDT balance in the portfolio.
+            atr: ATR value used only for theoretical SL/TP levels.
+            available_capital: Current available USDT balance.
 
         Returns:
-            A ``dict`` with the following keys:
-
-            * ``units``            — Number of asset units to purchase (float).
-            * ``cost_usdt``        — Total cost of the position in USDT (float).
-            * ``stop_loss_price``  — ATR-derived stop-loss level (float or None).
-            * ``take_profit_price``— R:R-derived take-profit level (float or None).
-            * ``risk_amount_usdt`` — USDT amount at risk if SL is hit (float).
-            * ``sl_distance``      — Raw stop-loss distance in USDT (float or None).
+            A ``dict`` with keys: ``units``, ``cost_usdt``,
+            ``stop_loss_price``, ``take_profit_price``,
+            ``risk_amount_usdt``, ``sl_distance``.
 
         Raises:
-            ValueError: If ``current_price`` or ``atr`` is non-positive.
+            ValueError: If ``current_price`` is non-positive.
         """
         action = signal_action.upper()
 
@@ -153,84 +152,79 @@ class RiskManager:
         # ── Input guards ──────────────────────────────────────────────────────
         if current_price <= 0:
             raise ValueError(f"current_price must be positive, got {current_price}.")
-        if atr <= 0:
-            raise ValueError(f"atr must be positive, got {atr}.")
         if available_capital <= 0:
-            logger.warning("RiskManager: available_capital=%.4f — insufficient funds.", available_capital)
+            logger.warning(
+                "RiskManager: available_capital=%.4f — insufficient funds.",
+                available_capital,
+            )
             return self._zero_metrics(action)
 
-        # ── Core ATR sizing math ──────────────────────────────────────────────
-        sl_distance: float = self.atr_multiplier * atr
-        stop_loss_price: float = current_price - sl_distance
-        take_profit_price: float = current_price + (sl_distance * self.risk_reward_ratio)
+        # ── Theoretical SL / TP levels (ATR-based, for tracking only) ─────────
+        # atr may be 0 on early candles; guard so we never divide by zero.
+        sl_distance: float | None       = None
+        stop_loss_price: float | None   = None
+        take_profit_price: float | None = None
+        if atr > 0:
+            sl_distance       = self.atr_multiplier * atr
+            stop_loss_price   = current_price - sl_distance
+            take_profit_price = current_price + (sl_distance * self.risk_reward_ratio)
 
+        # ── Fixed Capital Allocation sizing ───────────────────────────────────
+        # Step 1: compute allowed spend for this trade.
         risk_amount_usdt: float = available_capital * (self.risk_per_trade_pct / 100.0)
 
-        # Risk per unit = how many USDT we lose if price drops by sl_distance
-        units: float = risk_amount_usdt / sl_distance
-        cost_usdt: float = units * current_price
+        # Step 2: apply hard caps.
+        max_spend: float = min(risk_amount_usdt, self.max_position_size_usdt, available_capital)
 
-        # ── Clamp to hard cap ─────────────────────────────────────────────────
-        max_affordable: float = min(available_capital, self.max_position_size_usdt)
-        if cost_usdt > max_affordable:
-            logger.warning(
-                "RiskManager: calculated cost %.4f USDT exceeds cap %.4f USDT — clamping.",
-                cost_usdt,
-                max_affordable,
-            )
-            cost_usdt = max_affordable
-            units = cost_usdt / current_price
+        # Step 3: convert spend to asset units.
+        raw_units: float = max_spend / current_price
 
-        # ── Lot-size precision / minimum order enforcement ────────────────────
-        # Truncate to the exchange step size first to remove floating-point noise.
-        units = self._truncate_to_step(units, self.lot_step_size)
+        # Step 4: truncate to exchange lot-step precision.
+        units: float = self._truncate_to_step(raw_units, self.lot_step_size)
 
+        # Step 5: enforce exchange minimum lot size.
         if units < self.min_lot_size:
-            # Raw size is below the exchange minimum.  Check whether we can
-            # afford exactly min_lot_size before deciding to scale up or abort.
             min_lot_cost = self.min_lot_size * current_price
             if min_lot_cost <= available_capital:
-                # Scale up to the minimum — we accept a marginally higher risk
-                # percentage for this low-capital condition rather than skipping
-                # the trade entirely.
+                # Force up to minimum — a marginally higher spend % is
+                # preferable to skipping the trade on a small account.
                 logger.warning(
-                    "RiskManager: raw units %.8f below min_lot_size %.5f — "
-                    "scaling up to min_lot_size (cost=%.4f USDT, capital=%.4f USDT).",
+                    "RiskManager: truncated units %.8f < min_lot_size %.5f — "
+                    "forcing to min_lot_size (cost=%.4f USDT, capital=%.4f USDT).",
                     units, self.min_lot_size, min_lot_cost, available_capital,
                 )
                 units = self.min_lot_size
-                cost_usdt = min_lot_cost
             else:
-                # Cannot even afford the minimum lot — abort safely.
+                # Even the minimum lot exceeds available capital.
                 logger.warning(
-                    "RiskManager: min_lot_size cost %.4f USDT exceeds available "
-                    "capital %.4f USDT — returning zero position.",
+                    "RiskManager: min_lot_size cost %.4f USDT > capital %.4f USDT "
+                    "— returning zero position.",
                     min_lot_cost, available_capital,
                 )
                 return self._zero_metrics(action)
 
-        # Final truncation pass — ensures no floating-point creep from scaling
-        units = self._truncate_to_step(units, self.lot_step_size)
+        # Final truncation — removes any floating-point creep from the force-up.
+        units     = self._truncate_to_step(units, self.lot_step_size)
         cost_usdt = units * current_price
 
         metrics: dict[str, Any] = {
-            "action": action,
-            "units": units,
-            "cost_usdt": round(cost_usdt, 4),
-            "stop_loss_price": round(stop_loss_price, 4),
-            "take_profit_price": round(take_profit_price, 4),
-            "risk_amount_usdt": round(risk_amount_usdt, 4),
-            "sl_distance": round(sl_distance, 4),
+            "action":            action,
+            "units":             units,
+            "cost_usdt":         round(cost_usdt, 4),
+            "stop_loss_price":   round(stop_loss_price, 4) if stop_loss_price is not None else None,
+            "take_profit_price": round(take_profit_price, 4) if take_profit_price is not None else None,
+            "risk_amount_usdt":  round(risk_amount_usdt, 4),
+            "sl_distance":       round(sl_distance, 4) if sl_distance is not None else None,
         }
 
         logger.info(
-            "RiskManager [BUY]: units=%.8f  cost=%.4f USDT  SL=%.4f  TP=%.4f  "
-            "risk=%.4f USDT",
+            "RiskManager [BUY — Fixed Alloc]: units=%.8f  cost=%.4f USDT  "
+            "spend_pct=%.1f%%  SL=%s  TP=%s",
             metrics["units"],
             metrics["cost_usdt"],
+            self.risk_per_trade_pct,
             metrics["stop_loss_price"],
             metrics["take_profit_price"],
-            metrics["risk_amount_usdt"],
         )
         return metrics
 

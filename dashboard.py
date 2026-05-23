@@ -80,7 +80,7 @@ def _init():
         # initial_btc_price: price captured on Tick 1 for Buy&Hold baseline.
         "initial_btc_price": None,
         # per-agent simulated equity (starts at each agent's allocation).
-        "agent_equity": {k: 50.0 for k in AGENT_META},
+        "agent_equity": {k: 100.0 for k in AGENT_META},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -275,7 +275,7 @@ def _build_performance_chart() -> go.Figure | None:
 
     # Dotted horizontal baseline at starting allocation ($50)
     fig.add_hline(
-        y=50.0,
+        y=100.0,
         line_color="rgba(148,163,184,0.2)",
         line_dash="dot",
         line_width=1,
@@ -368,7 +368,7 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     # 4. Append performance snapshot for the equity chart
     init_price = st.session_state.initial_btc_price or current_price
     # Buy&Hold equity: normalise current price to starting allocation of $50
-    buy_hold_equity = (current_price / init_price) * 50.0
+    buy_hold_equity = (current_price / init_price) * 100.0
 
     # Simulated advisory equity: +0.1% on correct-direction signal, -0.05% on wrong
     # This is a lightweight paper-equity proxy for Zenith and Aegis (advisory only).
@@ -485,7 +485,7 @@ with st.sidebar:
         "Trading Pair",
         ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT"],
     )
-    timeframe    = st.selectbox("Timeframe", ["1h","15m","4h"])
+    timeframe    = st.selectbox("Timeframe", ["5m", "15m", "1h", "4h"])
     candle_limit = st.slider("Candles", 60, 300, 100, step=10)
 
     st.markdown("### ⏱️ Session Settings")
@@ -589,7 +589,7 @@ with ctrl_left:
                 st.session_state.signal_counts       = {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META}
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
-                st.session_state.agent_equity        = {k: 50.0 for k in AGENT_META}
+                st.session_state.agent_equity        = {k: 100.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agent={EXEC_AGENT}", "info")
                 st.rerun()
@@ -670,8 +670,8 @@ for i, agent_name in enumerate(agent_names):
         b_cnt = counts.get("BUY", 0)
         s_cnt = counts.get("SELL", 0)
         h_cnt = counts.get("HOLD", 0)
-        equity = st.session_state.agent_equity.get(agent_name, 50.0)
-        pnl    = equity - 50.0
+        equity = st.session_state.agent_equity.get(agent_name, 100.0)
+        pnl    = equity - 100.0
         pnl_color = "#34d399" if pnl >= 0 else "#f87171"
         pnl_sign  = "+" if pnl >= 0 else ""
         st.markdown(

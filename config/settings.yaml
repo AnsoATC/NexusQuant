@@ -4,11 +4,14 @@
 
 trading:
   default_symbol: "BTC/USDT"
-  primary_timeframe: "1h"
+  primary_timeframe: "5m"      # Optimised for session-based trading (changed from 1h)
   secondary_timeframe: "15m"
-  tertiary_timeframe: "5m"
+  tertiary_timeframe: "1h"
   default_limit: 500           # Number of OHLCV candles to fetch by default
   sandbox_mode: true           # Use exchange sandbox/testnet if available
+  # ── Session-based trading defaults ───────────────────────────────────────
+  default_timeframe: "5m"      # Default candle timeframe for the dashboard
+  default_tick_interval: 300   # Seconds between each session tick (5 minutes)
 
 data:
   raw_path: "data/raw"
@@ -22,13 +25,18 @@ exchange:
   timeout_ms: 30000            # Request timeout in milliseconds
 
 risk:
-  starting_capital_usdt: 100.0      # Simulated paper-trading starting balance
+  # Total allocation: $300 USDT split equally across 3 agents ($100 each)
+  starting_capital_usdt: 300.0      # Total portfolio capital across all agents
+  agent_allocation_usdt: 100.0      # Capital allocated per agent
   max_position_size_usdt: 100.0     # Hard cap on single position cost in USDT
   risk_per_trade_percent: 2.0       # % of available capital risked per trade
   atr_stop_loss_multiplier: 1.5     # Stop-loss = entry_price - (multiplier * ATR)
   risk_reward_ratio: 2.0            # Take-profit distance = SL_distance * ratio
   max_drawdown_percent: 5.0         # Maximum allowed portfolio drawdown before halting
   max_open_trades: 3                # Maximum concurrent open positions
+  # ── Lot size / precision constraints (Binance BTC/USDT defaults) ─────────
+  min_lot_size: 0.00001             # Minimum order size in base asset (BTC)
+  lot_step_size: 0.00001            # Precision step for order rounding (BTC)
 
 llm:
   model: "gemma3:4b"

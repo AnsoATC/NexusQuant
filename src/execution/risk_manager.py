@@ -25,6 +25,9 @@ DEFAULT_RISK_PER_TRADE_PERCENT: float = 2.0
 DEFAULT_ATR_STOP_LOSS_MULTIPLIER: float = 1.5
 DEFAULT_RISK_REWARD_RATIO: float = 2.0
 DEFAULT_MAX_POSITION_SIZE_USDT: float = 100.0
+# Binance BTC/USDT lot size defaults — overridden by config when available
+DEFAULT_MIN_LOT_SIZE: float = 0.00001    # Minimum order qty in base asset
+DEFAULT_LOT_STEP_SIZE: float = 0.00001   # Precision step for order qty rounding
 
 CONFIG_PATH: Path = Path(__file__).resolve().parents[2] / "config" / "settings.yaml"
 
@@ -73,14 +76,23 @@ class RiskManager:
         self.max_position_size_usdt: float = float(
             risk_cfg.get("max_position_size_usdt", DEFAULT_MAX_POSITION_SIZE_USDT)
         )
+        # Lot-size precision — prevents Binance -1013 / precision errors
+        self.min_lot_size: float = float(
+            risk_cfg.get("min_lot_size", DEFAULT_MIN_LOT_SIZE)
+        )
+        self.lot_step_size: float = float(
+            risk_cfg.get("lot_step_size", DEFAULT_LOT_STEP_SIZE)
+        )
 
         logger.info(
             "RiskManager initialised — risk_per_trade=%.1f%%  ATR_mult=%.2f  "
-            "R:R=1:%.1f  max_position=%.2f USDT",
+            "R:R=1:%.1f  max_position=%.2f USDT  min_lot=%.5f  step=%.5f",
             self.risk_per_trade_pct,
             self.atr_multiplier,
             self.risk_reward_ratio,
             self.max_position_size_usdt,
+            self.min_lot_size,
+            self.lot_step_size,
         )
 
     # ------------------------------------------------------------------
@@ -158,7 +170,7 @@ class RiskManager:
         units: float = risk_amount_usdt / sl_distance
         cost_usdt: float = units * current_price
 
-        # ── Clamp to hard limits ──────────────────────────────────────────────
+        # ── Clamp to hard cap ─────────────────────────────────────────────────
         max_affordable: float = min(available_capital, self.max_position_size_usdt)
         if cost_usdt > max_affordable:
             logger.warning(
@@ -169,9 +181,41 @@ class RiskManager:
             cost_usdt = max_affordable
             units = cost_usdt / current_price
 
+        # ── Lot-size precision / minimum order enforcement ────────────────────
+        # Truncate to the exchange step size first to remove floating-point noise.
+        units = self._truncate_to_step(units, self.lot_step_size)
+
+        if units < self.min_lot_size:
+            # Raw size is below the exchange minimum.  Check whether we can
+            # afford exactly min_lot_size before deciding to scale up or abort.
+            min_lot_cost = self.min_lot_size * current_price
+            if min_lot_cost <= available_capital:
+                # Scale up to the minimum — we accept a marginally higher risk
+                # percentage for this low-capital condition rather than skipping
+                # the trade entirely.
+                logger.warning(
+                    "RiskManager: raw units %.8f below min_lot_size %.5f — "
+                    "scaling up to min_lot_size (cost=%.4f USDT, capital=%.4f USDT).",
+                    units, self.min_lot_size, min_lot_cost, available_capital,
+                )
+                units = self.min_lot_size
+                cost_usdt = min_lot_cost
+            else:
+                # Cannot even afford the minimum lot — abort safely.
+                logger.warning(
+                    "RiskManager: min_lot_size cost %.4f USDT exceeds available "
+                    "capital %.4f USDT — returning zero position.",
+                    min_lot_cost, available_capital,
+                )
+                return self._zero_metrics(action)
+
+        # Final truncation pass — ensures no floating-point creep from scaling
+        units = self._truncate_to_step(units, self.lot_step_size)
+        cost_usdt = units * current_price
+
         metrics: dict[str, Any] = {
             "action": action,
-            "units": round(units, 8),
+            "units": units,
             "cost_usdt": round(cost_usdt, 4),
             "stop_loss_price": round(stop_loss_price, 4),
             "take_profit_price": round(take_profit_price, 4),
@@ -193,6 +237,27 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_to_step(value: float, step: float) -> float:
+        """Truncates ``value`` to the nearest multiple of ``step`` (floor).
+
+        Uses integer arithmetic to avoid floating-point precision errors that
+        arise from naive ``round(value / step) * step`` approaches.
+
+        Args:
+            value: The raw quantity to truncate.
+            step:  The exchange lot step size (e.g. ``0.00001`` for BTC/USDT).
+
+        Returns:
+            The largest multiple of ``step`` that does not exceed ``value``.
+        """
+        if step <= 0:
+            return value
+        # Scale to integer space, floor-divide, scale back.
+        precision = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0
+        factor = 10 ** precision
+        return int(value * factor) / factor
 
     @staticmethod
     def _load_risk_config(config_path: Path) -> dict:

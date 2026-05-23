@@ -520,7 +520,7 @@ remaining = max(0, session_hours * 3600 - elapsed)
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Session Status", "🟢 ACTIVE" if st.session_state.session_active else "⭕ IDLE")
 m2.metric("Ticks Completed", st.session_state.tick_count)
-m3.metric("Last BTC Price", f"${st.session_state.last_price:,.2f}" if st.session_state.last_price else "—")
+m3.metric(f"Last {symbol.split('/')[0]} Price", f"${st.session_state.last_price:,.2f}" if st.session_state.last_price else "—")
 m4.metric("Time Elapsed", f"{int(elapsed//60)}m {int(elapsed%60)}s" if st.session_state.session_active else "—")
 m5.metric("Time Remaining", f"{int(remaining//60)}m {int(remaining%60)}s" if st.session_state.session_active else "—")
 

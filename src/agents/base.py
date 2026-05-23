@@ -59,7 +59,11 @@ class BaseAgent(ABC):
         """
 
     @abstractmethod
-    def generate_signal(self, market_data: pd.DataFrame) -> dict:
+    def generate_signal(
+        self,
+        market_data: pd.DataFrame,
+        current_position_size: float = 0.0,
+    ) -> dict:
         """Analyses enriched market data and returns a standardised trading signal.
 
         This is the **core method** every agent must implement.  The
@@ -71,6 +75,11 @@ class BaseAgent(ABC):
                 :class:`~src.data.features.FeatureEngineer`, containing OHLCV
                 columns plus all computed technical indicator columns.  The
                 index is a UTC-aware :class:`pandas.DatetimeIndex`.
+            current_position_size: Current open position size in the base asset
+                (e.g. BTC units held).  ``0.0`` means no open position.
+                Used by the agent to constrain its action space:
+                - ``<= 0.0``: agent may BUY or HOLD only.
+                - ``> 0.0``: agent may SELL or HOLD only (prevents hoarding).
 
         Returns:
             A ``dict`` conforming to the following schema:

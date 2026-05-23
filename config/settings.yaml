@@ -29,11 +29,11 @@ risk:
   starting_capital_usdt: 300.0      # Total portfolio capital across all agents
   agent_allocation_usdt: 100.0      # Capital allocated per agent
   max_position_size_usdt: 100.0     # Hard cap on single position cost in USDT
-  risk_per_trade_percent: 20.0       # % of available capital risked per trade
+  risk_per_trade_percent: 30.0       # % of available capital allocated per trade (Fixed Allocation model)
   atr_stop_loss_multiplier: 1.5     # Stop-loss = entry_price - (multiplier * ATR)
   risk_reward_ratio: 2.0            # Take-profit distance = SL_distance * ratio
   
-  max_drawdown_percent: 30.0        # [UPDATED] Increased to 30% to allow for the 20% risk appetite
+  max_drawdown_percent: 40.0         # Must be > single trade risk to prevent premature session halt
   max_open_trades: 3                # Maximum concurrent open positions
   
   # ── Lot size & Minimums ──────────────────────────────────────────────────

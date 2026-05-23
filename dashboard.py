@@ -341,12 +341,28 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
         st.session_state.initial_btc_price = current_price
         _log(f"Buy&Hold baseline set: ${current_price:,.2f}", "info")
 
-    # 2. Agent signals + signal counter update
+    # 2. Fetch live position size for position-aware signal generation
+    # Fetch the current base asset balance (e.g. SOL, BTC) so agents know
+    # whether they hold an open position before deciding to BUY or SELL.
+    base_asset = symbol.split("/")[0]   # e.g. "SOL" from "SOL/USDT"
+    current_position_size = 0.0
+    try:
+        broker = _get_broker()
+        current_position_size = broker.get_free_balance(base_asset)
+        _log(
+            f"Position check: {base_asset}={current_position_size:.8f} "
+            f"({'OPEN' if current_position_size > 0 else 'FLAT'})",
+            "info",
+        )
+    except Exception as exc:
+        _log(f"Position fetch failed ({base_asset}): {exc} — defaulting to FLAT.", "err")
+
+    # 3. Agent signals + signal counter update
     agents_map = {"DimmerForce": DimmerForceAgent(), "Zenith": ZenithAgent(), "Aegis": AegisAgent()}
     enriched_df = st.session_state.enriched_df
     for name, agent in agents_map.items():
         try:
-            sig = agent.generate_signal(enriched_df)
+            sig = agent.generate_signal(enriched_df, current_position_size=current_position_size)
             st.session_state.signals[name] = sig
             st.session_state.errors[name] = None
             action = sig["action"]

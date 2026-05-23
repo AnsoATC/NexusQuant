@@ -88,20 +88,29 @@ class OllamaAgentMixin(BaseAgent):
     # BaseAgent interface — generate_signal is shared across all agents
     # ------------------------------------------------------------------
 
-    def generate_signal(self, market_data: pd.DataFrame) -> dict:
+    def generate_signal(
+        self,
+        market_data: pd.DataFrame,
+        current_position_size: float = 0.0,
+    ) -> dict:
         """Queries Gemma 4 via Ollama and returns a validated trading signal.
 
         Workflow:
             1. Format the last :data:`CONTEXT_ROWS` candles as a Markdown table.
-            2. Call :meth:`_build_prompt` (persona-specific — implemented by
-               each subclass).
-            3. POST to the Ollama ``/api/generate`` endpoint.
-            4. Parse and validate the JSON response.
-            5. Return validated signal, or safe HOLD fallback on any error.
+            2. Build a position-context instruction based on ``current_position_size``:
+               - ``<= 0``: agent is told it has NO open position → BUY or HOLD only.
+               - ``> 0``: agent is told it has an OPEN LONG → SELL or HOLD only.
+            3. Call :meth:`_build_prompt` (persona-specific — implemented by each subclass).
+            4. Prepend the position-context instruction to the prompt.
+            5. POST to the Ollama ``/api/generate`` endpoint.
+            6. Parse and validate the JSON response.
+            7. Return validated signal, or safe HOLD fallback on any error.
 
         Args:
             market_data: Enriched OHLCV DataFrame from
                 :class:`~src.data.features.FeatureEngineer`.
+            current_position_size: Current open position size in the base asset.
+                ``0.0`` means no open position.
 
         Returns:
             Signal dict: ``{action, confidence, reason, agent, model}``.
@@ -117,8 +126,36 @@ class OllamaAgentMixin(BaseAgent):
             latest.get("EMA_50", float("nan")),
         )
 
+        # ── Position-context injection ─────────────────────────────────────────
+        # Explicitly tell the LLM what it may and may not do based on the
+        # current open position.  This prevents hoarding (consecutive BUYs)
+        # and erroneous SELLs when no position is held.
+        if current_position_size <= 0.0:
+            position_context = (
+                "CRITICAL PORTFOLIO STATUS: You currently have NO OPEN POSITION. "
+                "Your ONLY valid actions are BUY (to enter a long trade) or HOLD "
+                "(to wait for a better entry). You MUST NOT output SELL."
+            )
+        else:
+            position_context = (
+                f"CRITICAL PORTFOLIO STATUS: You currently have an OPEN LONG POSITION "
+                f"of {current_position_size:.8f} units. You CANNOT BUY more. "
+                f"Your ONLY valid actions are SELL (to close the position and realise "
+                f"profit or cut losses) or HOLD (to stay in the trade). "
+                f"You MUST NOT output BUY."
+            )
+
+        logger.info(
+            "[%s] Position context: position_size=%.8f — injecting constraint into prompt.",
+            self.name, current_position_size,
+        )
+
         formatted_data = self._format_market_data(market_data, rows=CONTEXT_ROWS)
-        prompt = self._build_prompt(formatted_data)
+        base_prompt = self._build_prompt(formatted_data)
+
+        # Prepend the position context so it appears before the persona instruction,
+        # making it the most salient instruction for the model.
+        prompt = f"{position_context}\n\n{base_prompt}"
 
         raw_response = self._call_ollama(prompt)
         if raw_response is None:
@@ -134,8 +171,34 @@ class OllamaAgentMixin(BaseAgent):
             logger.error("[%s] Signal validation failed: %s", self.name, exc)
             return self._safe_fallback(str(exc))
 
-        logger.info("[%s] Signal: %s", self.name, signal)
+        # ── Hard action guard ──────────────────────────────────────────────────
+        # Even if the LLM ignores the position-context instruction, enforce the
+        # constraint here so invalid actions never reach the execution layer.
+        action = signal.get("action", "HOLD")
+        if current_position_size <= 0.0 and action == "SELL":
+            logger.warning(
+                "[%s] LLM returned SELL with no open position — overriding to HOLD.",
+                self.name,
+            )
+            signal["action"] = "HOLD"
+            signal["reason"] = (
+                f"[Overridden] No open position; SELL is invalid. Original reason: "
+                f"{signal.get('reason', '')}"
+            )
+        elif current_position_size > 0.0 and action == "BUY":
+            logger.warning(
+                "[%s] LLM returned BUY with existing position — overriding to HOLD.",
+                self.name,
+            )
+            signal["action"] = "HOLD"
+            signal["reason"] = (
+                f"[Overridden] Open position exists; BUY is invalid. Original reason: "
+                f"{signal.get('reason', '')}"
+            )
+
+        logger.info("[%s] Final signal: %s", self.name, signal)
         return signal
+
 
     # ------------------------------------------------------------------
     # Abstract — each agent persona overrides only this

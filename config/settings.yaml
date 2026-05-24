@@ -27,9 +27,9 @@ exchange:
 risk:
   # Total allocation: $300 USDT split equally across 3 agents ($100 each)
   starting_capital_usdt: 300.0      # Total portfolio capital across all agents
-  agent_allocation_usdt: 100.0      # Capital allocated per agent
+  agent_allocation_usdt: 200.0      # Capital allocated per agent (isolated simulation budget)
   max_position_size_usdt: 100.0     # Hard cap on single position cost in USDT
-  risk_per_trade_percent: 30.0       # % of available capital allocated per trade (Fixed Allocation model)
+  risk_per_trade_percent: 50.0       # % of simulated agent equity spent per trade (Fixed Allocation model)
   atr_stop_loss_multiplier: 1.5     # Stop-loss = entry_price - (multiplier * ATR)
   risk_reward_ratio: 2.0            # Take-profit distance = SL_distance * ratio
   

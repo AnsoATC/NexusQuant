@@ -80,7 +80,7 @@ def _init():
         # initial_btc_price: price captured on Tick 1 for Buy&Hold baseline.
         "initial_btc_price": None,
         # per-agent simulated equity (starts at each agent's allocation).
-        "agent_equity": {k: 100.0 for k in AGENT_META},
+        "agent_equity": {k: 200.0 for k in AGENT_META},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -275,7 +275,7 @@ def _build_performance_chart() -> go.Figure | None:
 
     # Dotted horizontal baseline at starting allocation ($50)
     fig.add_hline(
-        y=100.0,
+        y=200.0,
         line_color="rgba(148,163,184,0.2)",
         line_dash="dot",
         line_width=1,
@@ -408,12 +408,13 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     # 3. Execute order via DimmerForce signal
     exec_signal = st.session_state.signals.get(EXEC_AGENT)
     if exec_signal:
-        _execute_testnet_order(exec_signal, symbol)
+        agent_capital = st.session_state.agent_equity.get(EXEC_AGENT, 200.0)
+        _execute_testnet_order(exec_signal, symbol, agent_capital)
 
     # 4. Append performance snapshot for the equity chart
     init_price = st.session_state.initial_btc_price or current_price
     # Buy&Hold equity: normalise current price to starting allocation of $50
-    buy_hold_equity = (current_price / init_price) * 100.0
+    buy_hold_equity = (current_price / init_price) * 200.0
 
     # Simulated advisory equity: +0.1% on correct-direction signal, -0.05% on wrong
     # This is a lightweight paper-equity proxy for Zenith and Aegis (advisory only).
@@ -444,8 +445,14 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     _log(f"Tick #{st.session_state.tick_count} complete in {st.session_state.last_tick_s:.1f}s", "info")
 
 
-def _execute_testnet_order(signal: dict, symbol: str) -> None:
-    """Translates a DimmerForce signal into a testnet order."""
+def _execute_testnet_order(signal: dict, symbol: str, agent_capital: float) -> None:
+    """Translates a DimmerForce signal into a testnet order.
+
+    Trade size is calculated against ``agent_capital`` — the dashboard's
+    simulated equity — NOT the raw broker USDT balance.  This enforces
+    strict capital isolation so a testnet account with $85,000 still
+    sizes trades as if only ``agent_capital`` dollars are available.
+    """
     from src.execution.broker import BrokerError
     from src.execution.risk_manager import RiskManager
 
@@ -459,40 +466,76 @@ def _execute_testnet_order(signal: dict, symbol: str) -> None:
         current_price = st.session_state.last_price or 0.0
 
         if action == "BUY":
-            usdt_balance = broker.get_free_balance("USDT")
+            # Guard: simulated capital must be meaningful before placing an order.
+            if agent_capital < 5.0:
+                _log(
+                    f"[{EXEC_AGENT}] BUY skipped — simulated capital too low "
+                    f"(${agent_capital:.2f})",
+                    "err",
+                )
+                return
+
             enriched_df = st.session_state.enriched_df
             atr = float(enriched_df["ATRr_14"].iloc[-1]) if enriched_df is not None else 0.0
-
-            if usdt_balance < 10.0:
-                _log(f"[{EXEC_AGENT}] BUY skipped — USDT balance too low ({usdt_balance:.2f})", "err")
-                return
 
             rm = RiskManager()
             metrics = rm.calculate_position_size(
                 signal_action="BUY",
                 current_price=current_price,
                 atr=atr if atr > 0 else current_price * 0.003,
-                available_capital=usdt_balance,
+                # ── STRICT CAPITAL ISOLATION ───────────────────────────────
+                # Use the dashboard's simulated equity, NOT the broker balance.
+                # This guarantees trade sizes are anchored to the $200 budget,
+                # regardless of how large the testnet account actually is.
+                available_capital=agent_capital,
             )
             units = metrics.get("units", 0.0)
+            cost  = metrics.get("cost_usdt", 0.0)
+
             if units <= 0:
                 _log(f"[{EXEC_AGENT}] BUY skipped — RiskManager returned 0 units.", "err")
                 return
 
-            _log(f"[{EXEC_AGENT}] Placing MARKET BUY {units:.8f} {symbol} @ ~${current_price:,.2f}", "buy")
+            _log(
+                f"[{EXEC_AGENT}] Placing MARKET BUY {units:.8f} {symbol} "
+                f"@ ~${current_price:,.2f}  (capital=${agent_capital:.2f}, cost=${cost:.2f})",
+                "buy",
+            )
             order = broker.execute_order(symbol=symbol, side="buy", amount=units)
             _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "buy")
 
+            # Deduct actual cost from simulated equity so the dashboard tracks
+            # realistic balance drawdown independent of the broker balance.
+            st.session_state.agent_equity[EXEC_AGENT] = max(0.0, agent_capital - cost)
+            _log(
+                f"[{EXEC_AGENT}] Simulated equity updated: "
+                f"${agent_capital:.2f} → ${st.session_state.agent_equity[EXEC_AGENT]:.2f}",
+                "info",
+            )
+
         elif action == "SELL":
             base_ticker = symbol.split("/")[0]  # e.g. "BTC"
-            btc_balance = broker.get_free_balance(base_ticker)
-            if btc_balance <= 0.0:
+            base_balance = broker.get_free_balance(base_ticker)
+            if base_balance <= 0.0:
                 _log(f"[{EXEC_AGENT}] SELL skipped — no {base_ticker} balance to sell.", "err")
                 return
 
-            _log(f"[{EXEC_AGENT}] Placing MARKET SELL {btc_balance:.8f} {symbol}", "sell")
-            order = broker.execute_order(symbol=symbol, side="sell", amount=btc_balance)
+            sell_value = base_balance * current_price
+            _log(
+                f"[{EXEC_AGENT}] Placing MARKET SELL {base_balance:.8f} {symbol} "
+                f"@ ~${current_price:,.2f}  (est. return=${sell_value:.2f})",
+                "sell",
+            )
+            order = broker.execute_order(symbol=symbol, side="sell", amount=base_balance)
             _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "sell")
+
+            # Credit estimated USDT proceeds back to the simulated equity.
+            st.session_state.agent_equity[EXEC_AGENT] = agent_capital + sell_value
+            _log(
+                f"[{EXEC_AGENT}] Simulated equity updated: "
+                f"${agent_capital:.2f} → ${st.session_state.agent_equity[EXEC_AGENT]:.2f}",
+                "info",
+            )
 
     except BrokerError as exc:
         _log(f"[{EXEC_AGENT}] Broker error: {exc}", "err")
@@ -634,7 +677,7 @@ with ctrl_left:
                 st.session_state.signal_counts       = {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META}
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
-                st.session_state.agent_equity        = {k: 100.0 for k in AGENT_META}
+                st.session_state.agent_equity        = {k: 200.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agent={EXEC_AGENT}", "info")
                 st.rerun()
@@ -715,8 +758,8 @@ for i, agent_name in enumerate(agent_names):
         b_cnt = counts.get("BUY", 0)
         s_cnt = counts.get("SELL", 0)
         h_cnt = counts.get("HOLD", 0)
-        equity = st.session_state.agent_equity.get(agent_name, 100.0)
-        pnl    = equity - 100.0
+        equity = st.session_state.agent_equity.get(agent_name, 200.0)
+        pnl    = equity - 200.0
         pnl_color = "#34d399" if pnl >= 0 else "#f87171"
         pnl_sign  = "+" if pnl >= 0 else ""
         st.markdown(

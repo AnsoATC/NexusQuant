@@ -348,7 +348,36 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     current_position_size = 0.0
     try:
         broker = _get_broker()
-        current_position_size = broker.get_free_balance(base_asset)
+        raw_balance = broker.get_free_balance(base_asset)
+
+        # ── Dust filter ───────────────────────────────────────────────────────
+        # Exchange balances can contain sub-lot "dust" (e.g. 0.00000174 BTC)
+        # that is smaller than Binance's minimum sellable lot size.  If the
+        # agent treats dust as an open position it will try to SELL it, the
+        # broker will reject the order, and the session enters an infinite
+        # fail loop.  Zeroing out dust restores a clean FLAT state so the
+        # agent can place fresh BUY orders.
+        #
+        # Thresholds are set to the exchange minimum lot for each asset class:
+        #   BTC  → 0.00001  (Binance step size)
+        #   High-value coins (ETH, BNB, SOL, XRP, DOGE) → 0.01
+        _DUST_THRESHOLDS: dict[str, float] = {
+            "BTC":  0.00001,   # Binance BTC/USDT min lot size
+        }
+        # Default threshold for all altcoins not explicitly listed above
+        _dust_threshold = _DUST_THRESHOLDS.get(base_asset, 0.01)
+
+        if raw_balance < _dust_threshold:
+            if raw_balance > 0:
+                _log(
+                    f"Dust filter: {base_asset}={raw_balance:.8f} < "
+                    f"threshold {_dust_threshold} — treating as FLAT.",
+                    "info",
+                )
+            current_position_size = 0.0
+        else:
+            current_position_size = raw_balance
+
         _log(
             f"Position check: {base_asset}={current_position_size:.8f} "
             f"({'OPEN' if current_position_size > 0 else 'FLAT'})",

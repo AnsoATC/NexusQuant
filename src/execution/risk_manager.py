@@ -1,10 +1,13 @@
 """Risk management module for NexusQuant.
 
-Provides the RiskManager class, which translates a raw trading signal into
-concrete position sizing metrics using an ATR-based stop-loss model.
+Provides the RiskManager class which:
+  * Translates raw trading signals into concrete position sizing metrics
+    using a Fixed Capital Allocation model.
+  * Detects high-conviction price breakouts using a 20-candle range filter
+    combined with a volume-ratio threshold.
 
-All risk parameters are driven by ``config/settings.yaml`` so the strategy can
-be tuned without touching source code.
+All risk parameters are driven by ``config/settings.yaml`` so the strategy
+can be tuned without touching source code.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -227,6 +231,93 @@ class RiskManager:
             metrics["take_profit_price"],
         )
         return metrics
+
+    # ------------------------------------------------------------------
+    # Breakout detection
+    # ------------------------------------------------------------------
+
+    def detect_breakout(
+        self,
+        market_data: pd.DataFrame,
+        current_price: float,
+        volume_ratio: float,
+        lookback: int = 20,
+        conviction_threshold: float = 1.5,
+    ) -> str:
+        """Identifies a volume-confirmed price breakout over the last ``lookback`` candles.
+
+        Algorithm:
+            1. Calculate the highest high and lowest low of the last ``lookback``
+               candles (excluding the current / most-recent candle).
+            2. If ``current_price > highest_high`` **and** ``volume_ratio >= conviction_threshold``
+               → **BUY_BREAKOUT**  (upside breakout with conviction).
+            3. If ``current_price < lowest_low``  **and** ``volume_ratio >= conviction_threshold``
+               → **SELL_BREAKOUT** (downside breakout with conviction).
+            4. Otherwise → **NONE** (no breakout or insufficient volume).
+
+        Args:
+            market_data: Enriched OHLCV DataFrame with at least ``high`` and
+                ``low`` columns.
+            current_price: Latest close price in USDT.
+            volume_ratio: Current volume divided by VMA_20 (computed in the
+                agent layer and passed in to avoid recalculation).
+            lookback: Number of prior candles used to establish the range.
+                Defaults to ``20``.
+            conviction_threshold: Minimum volume_ratio required to confirm a
+                breakout.  Defaults to ``1.5``.
+
+        Returns:
+            One of:
+            * ``"BUY_BREAKOUT"``  — price broke above the 20-candle high on
+              high volume.
+            * ``"SELL_BREAKOUT"`` — price broke below the 20-candle low on
+              high volume.
+            * ``"NONE"``          — no confirmed breakout.
+        """
+        required_cols = {"high", "low"}
+        if not required_cols.issubset(market_data.columns):
+            logger.warning(
+                "RiskManager.detect_breakout: 'high' or 'low' column missing — "
+                "returning NONE."
+            )
+            return "NONE"
+
+        if len(market_data) < lookback + 1:
+            logger.debug(
+                "RiskManager.detect_breakout: insufficient rows (%d < %d) — "
+                "returning NONE.",
+                len(market_data), lookback + 1,
+            )
+            return "NONE"
+
+        # Exclude the current (last) candle to form a clean prior range.
+        prior = market_data.iloc[-(lookback + 1):-1]
+        highest_high = float(prior["high"].max())
+        lowest_low   = float(prior["low"].min())
+
+        logger.info(
+            "RiskManager.detect_breakout: price=%.4f  high_20=%.4f  low_20=%.4f  "
+            "vol_ratio=%.2f  threshold=%.1f",
+            current_price, highest_high, lowest_low, volume_ratio, conviction_threshold,
+        )
+
+        if current_price > highest_high and volume_ratio >= conviction_threshold:
+            logger.info(
+                "RiskManager.detect_breakout: BUY_BREAKOUT confirmed — "
+                "price %.4f > high_20 %.4f on volume_ratio %.2f.",
+                current_price, highest_high, volume_ratio,
+            )
+            return "BUY_BREAKOUT"
+
+        if current_price < lowest_low and volume_ratio >= conviction_threshold:
+            logger.info(
+                "RiskManager.detect_breakout: SELL_BREAKOUT confirmed — "
+                "price %.4f < low_20 %.4f on volume_ratio %.2f.",
+                current_price, lowest_low, volume_ratio,
+            )
+            return "SELL_BREAKOUT"
+
+        return "NONE"
 
     # ------------------------------------------------------------------
     # Private helpers

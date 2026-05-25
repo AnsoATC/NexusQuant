@@ -96,15 +96,14 @@ class OllamaAgentMixin(BaseAgent):
         """Queries Gemma 4 via Ollama and returns a validated trading signal.
 
         Workflow:
-            1. Format the last :data:`CONTEXT_ROWS` candles as a Markdown table.
-            2. Build a position-context instruction based on ``current_position_size``:
-               - ``<= 0``: agent is told it has NO open position → BUY or HOLD only.
-               - ``> 0``: agent is told it has an OPEN LONG → SELL or HOLD only.
-            3. Call :meth:`_build_prompt` (persona-specific — implemented by each subclass).
-            4. Prepend the position-context instruction to the prompt.
+            1. Hard trailing-stop check (EMA_20 cross) — if triggered, return
+               immediate SELL without calling the LLM.
+            2. Compute volume_ratio = current_volume / VMA_20 for conviction gating.
+            3. Build position-context and Market Conviction instruction blocks.
+            4. Call :meth:`_build_prompt` (persona-specific) and prepend both blocks.
             5. POST to the Ollama ``/api/generate`` endpoint.
-            6. Parse and validate the JSON response.
-            7. Return validated signal, or safe HOLD fallback on any error.
+            6. Parse, validate, and apply hard action guard.
+            7. Return final signal, or safe HOLD fallback on any error.
 
         Args:
             market_data: Enriched OHLCV DataFrame from
@@ -126,10 +125,61 @@ class OllamaAgentMixin(BaseAgent):
             latest.get("EMA_50", float("nan")),
         )
 
+        # ── Task 3: Hard trailing stop (EMA_20 cross) ─────────────────────────
+        # This executes BEFORE the LLM is called and takes absolute priority.
+        # If the current close has dropped below EMA_20 while holding a position,
+        # we force an immediate SELL to protect capital.
+        trailing_stop_signal = self.check_trailing_stop(market_data, current_position_size)
+        if trailing_stop_signal is not None:
+            trailing_stop_signal["agent"] = self.name
+            trailing_stop_signal["model"] = self.model_name
+            logger.info("[%s] Trailing stop fired — bypassing LLM.", self.name)
+            return trailing_stop_signal
+
+        # ── Task 1: Volume conviction analysis ───────────────────────────────
+        # Calculate VMA_20 (Volume Moving Average over last 20 candles) and the
+        # current volume ratio.  This tells the LLM whether the move is backed
+        # by meaningful participation or is just low-volume noise.
+        VMA_WINDOW: int = 20
+        CONVICTION_THRESHOLD: float = 1.5  # ratio >= 1.5 = high-conviction move
+
+        volume_ratio: float = 1.0  # safe default — neutral conviction
+        vma_20: float = 0.0
+        if "volume" in market_data.columns and len(market_data) >= VMA_WINDOW:
+            vma_20 = float(market_data["volume"].tail(VMA_WINDOW).mean())
+            if vma_20 > 0:
+                volume_ratio = float(market_data["volume"].iloc[-1]) / vma_20
+
+        if volume_ratio >= CONVICTION_THRESHOLD:
+            conviction_label = "HIGH"
+            conviction_instruction = (
+                f"Volume ratio is {volume_ratio:.2f} (>= {CONVICTION_THRESHOLD}) — "
+                f"HIGH market conviction. You MAY issue BUY or SELL signals if price "
+                f"action and technical indicators confirm a breakout."
+            )
+        else:
+            conviction_label = "LOW"
+            conviction_instruction = (
+                f"Volume ratio is {volume_ratio:.2f} (< {CONVICTION_THRESHOLD}) — "
+                f"LOW market conviction. The market is consolidating on weak volume. "
+                f"You MUST prioritise HOLD. Ignore MACD and RSI signals — only act "
+                f"on clear, high-volume breakouts."
+            )
+
+        logger.info(
+            "[%s] Volume conviction: ratio=%.2f  VMA_20=%.2f  label=%s",
+            self.name, volume_ratio, vma_20, conviction_label,
+        )
+
+        market_conviction_block = (
+            f"CRITICAL \u2014 MARKET CONVICTION ANALYSIS:\n"
+            f"  Current Volume Ratio = {volume_ratio:.2f}  "
+            f"(current_volume / VMA_20)  |  Threshold = {CONVICTION_THRESHOLD}\n"
+            f"  {conviction_instruction}"
+        )
+
         # ── Position-context injection ─────────────────────────────────────────
-        # Explicitly tell the LLM what it may and may not do based on the
-        # current open position.  This prevents hoarding (consecutive BUYs)
-        # and erroneous SELLs when no position is held.
+        # Tells the LLM what actions are valid based on the current position.
         if current_position_size <= 0.0:
             position_context = (
                 "CRITICAL PORTFOLIO STATUS: You currently have NO OPEN POSITION. "
@@ -153,9 +203,9 @@ class OllamaAgentMixin(BaseAgent):
         formatted_data = self._format_market_data(market_data, rows=CONTEXT_ROWS)
         base_prompt = self._build_prompt(formatted_data)
 
-        # Prepend the position context so it appears before the persona instruction,
-        # making it the most salient instruction for the model.
-        prompt = f"{position_context}\n\n{base_prompt}"
+        # Stack: conviction block → position context → persona prompt.
+        # Order ensures conviction is the first thing the model reads.
+        prompt = f"{market_conviction_block}\n\n{position_context}\n\n{base_prompt}"
 
         raw_response = self._call_ollama(prompt)
         if raw_response is None:
@@ -172,8 +222,8 @@ class OllamaAgentMixin(BaseAgent):
             return self._safe_fallback(str(exc))
 
         # ── Hard action guard ──────────────────────────────────────────────────
-        # Even if the LLM ignores the position-context instruction, enforce the
-        # constraint here so invalid actions never reach the execution layer.
+        # Safety net: even if the LLM ignores the position-context instruction,
+        # enforce the constraint so invalid actions never reach execution.
         action = signal.get("action", "HOLD")
         if current_position_size <= 0.0 and action == "SELL":
             logger.warning(
@@ -196,8 +246,13 @@ class OllamaAgentMixin(BaseAgent):
                 f"{signal.get('reason', '')}"
             )
 
+        # Attach volume conviction metadata for dashboard display.
+        signal["volume_ratio"]  = round(volume_ratio, 2)
+        signal["conviction"]    = conviction_label
+
         logger.info("[%s] Final signal: %s", self.name, signal)
         return signal
+
 
 
     # ------------------------------------------------------------------

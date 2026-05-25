@@ -142,3 +142,58 @@ class BaseAgent(ABC):
             action,
             confidence,
         )
+
+    def check_trailing_stop(
+        self,
+        market_data: pd.DataFrame,
+        current_position_size: float,
+    ) -> dict | None:
+        """Hard-coded trailing stop: force-SELL when price crosses below EMA_20.
+
+        This rule runs **before** the LLM is consulted and takes absolute
+        priority over any LLM output.  It protects capital during fast
+        reversals where waiting a full tick for the model would be too slow.
+
+        The rule only activates when:
+        - ``current_position_size > 0``  (we actually hold a position), AND
+        - The latest close is **below** EMA_20.
+
+        Args:
+            market_data: Enriched OHLCV DataFrame with at least an ``EMA_20``
+                column and a ``close`` column.
+            current_position_size: Current open position size in base asset.
+                ``0.0`` or negative means FLAT — rule is skipped.
+
+        Returns:
+            A SELL signal dict if the trailing stop fires, otherwise ``None``.
+        """
+        if current_position_size <= 0.0:
+            return None  # No position — nothing to protect.
+
+        if "EMA_20" not in market_data.columns or "close" not in market_data.columns:
+            logger.warning(
+                "[%s] check_trailing_stop: EMA_20 or close column missing — skipping.",
+                self.name,
+            )
+            return None
+
+        latest = market_data.iloc[-1]
+        close  = float(latest["close"])
+        ema_20 = float(latest["EMA_20"])
+
+        if close < ema_20:
+            logger.warning(
+                "[%s] TRAILING STOP TRIGGERED: close=%.4f < EMA_20=%.4f "
+                "— forcing immediate SELL to protect capital.",
+                self.name, close, ema_20,
+            )
+            return {
+                "action":     "SELL",
+                "confidence": 1.0,
+                "reason": (
+                    f"[Hard Stop] Close ({close:.4f}) crossed below EMA_20 ({ema_20:.4f}). "
+                    f"Forced SELL to protect capital."
+                ),
+            }
+
+        return None  # Price still above EMA_20 — hold and let LLM decide.

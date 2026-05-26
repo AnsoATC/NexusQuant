@@ -136,46 +136,33 @@ class OllamaAgentMixin(BaseAgent):
             logger.info("[%s] Trailing stop fired — bypassing LLM.", self.name)
             return trailing_stop_signal
 
-        # ── Task 1: Volume conviction analysis ───────────────────────────────
-        # Calculate VMA_20 (Volume Moving Average over last 20 candles) and the
-        # current volume ratio.  This tells the LLM whether the move is backed
-        # by meaningful participation or is just low-volume noise.
-        VMA_WINDOW: int = 20
-        CONVICTION_THRESHOLD: float = 1.5  # ratio >= 1.5 = high-conviction move
-
-        volume_ratio: float = 1.0  # safe default — neutral conviction
-        vma_20: float = 0.0
-        if "volume" in market_data.columns and len(market_data) >= VMA_WINDOW:
-            vma_20 = float(market_data["volume"].tail(VMA_WINDOW).mean())
-            if vma_20 > 0:
-                volume_ratio = float(market_data["volume"].iloc[-1]) / vma_20
-
-        if volume_ratio >= CONVICTION_THRESHOLD:
-            conviction_label = "HIGH"
-            conviction_instruction = (
-                f"Volume ratio is {volume_ratio:.2f} (>= {CONVICTION_THRESHOLD}) — "
-                f"HIGH market conviction. You MAY issue BUY or SELL signals if price "
-                f"action and technical indicators confirm a breakout."
-            )
+        # ── Rate-of-Change (ROC) Momentum Analysis ───────────────────────────
+        # Retrieve pre-computed ROC_5 (5-period Price Rate-of-Change) from the latest candle.
+        # This tells us if price accelerated upward (>0.5%) or dropped (< -0.5%).
+        latest_roc: float = 0.0
+        if "ROC_5" in market_data.columns:
+            latest_roc = float(latest["ROC_5"])
         else:
-            conviction_label = "LOW"
-            conviction_instruction = (
-                f"Volume ratio is {volume_ratio:.2f} (< {CONVICTION_THRESHOLD}) — "
-                f"LOW market conviction. The market is consolidating on weak volume. "
-                f"You MUST prioritise HOLD. Ignore MACD and RSI signals — only act "
-                f"on clear, high-volume breakouts."
-            )
+            # Fallback calculation if the column is somehow missing
+            ROC_WINDOW: int = 5
+            if len(market_data) >= (ROC_WINDOW + 1):
+                close_now = float(market_data["close"].iloc[-1])
+                close_prev = float(market_data["close"].iloc[-(ROC_WINDOW + 1)])
+                if close_prev > 0:
+                    latest_roc = ((close_now - close_prev) / close_prev) * 100
 
         logger.info(
-            "[%s] Volume conviction: ratio=%.2f  VMA_20=%.2f  label=%s",
-            self.name, volume_ratio, vma_20, conviction_label,
+            "[%s] ROC Momentum analysis: ROC_5=%.2f%%",
+            self.name, latest_roc,
         )
 
-        market_conviction_block = (
-            f"CRITICAL \u2014 MARKET CONVICTION ANALYSIS:\n"
-            f"  Current Volume Ratio = {volume_ratio:.2f}  "
-            f"(current_volume / VMA_20)  |  Threshold = {CONVICTION_THRESHOLD}\n"
-            f"  {conviction_instruction}"
+        roc_momentum_block = (
+            f"CRITICAL \u2014 MOMENTUM ANALYSIS:\n"
+            f"  Current 5-period Price Rate-of-Change (ROC) = {latest_roc:.2f}%\n"
+            f"  You are a Momentum Trader. Evaluate the current 5-period Price Rate-of-Change (ROC). "
+            f"If the price is accelerating (ROC > 0.5%), issue a BUY signal immediately. "
+            f"If the price is decelerating (ROC < -0.5%), issue a SELL signal immediately. "
+            f"Trade the price action itself, do not wait for volume confirmation."
         )
 
         # ── Position-context injection ─────────────────────────────────────────
@@ -203,9 +190,9 @@ class OllamaAgentMixin(BaseAgent):
         formatted_data = self._format_market_data(market_data, rows=CONTEXT_ROWS)
         base_prompt = self._build_prompt(formatted_data)
 
-        # Stack: conviction block → position context → persona prompt.
-        # Order ensures conviction is the first thing the model reads.
-        prompt = f"{market_conviction_block}\n\n{position_context}\n\n{base_prompt}"
+        # Stack: momentum block → position context → persona prompt.
+        # Order ensures momentum instructions are the first thing the model reads.
+        prompt = f"{roc_momentum_block}\n\n{position_context}\n\n{base_prompt}"
 
         raw_response = self._call_ollama(prompt)
         if raw_response is None:
@@ -220,6 +207,28 @@ class OllamaAgentMixin(BaseAgent):
         except (KeyError, ValueError) as exc:
             logger.error("[%s] Signal validation failed: %s", self.name, exc)
             return self._safe_fallback(str(exc))
+
+        # ── Aggressive Momentum Strategy Override ───────────────────────────
+        # Ensure we enforce the mathematical ROC trigger on the final signal.
+        # If ROC > 0.5% and position size is flat: force BUY.
+        # If ROC < -0.5% and position size is long: force SELL.
+        action = signal.get("action", "HOLD")
+        if latest_roc > 0.5 and current_position_size <= 0.0 and action != "BUY":
+            logger.warning(
+                "[%s] ROC is %.2f%% > 0.5%% but LLM returned %s — overriding to BUY.",
+                self.name, latest_roc, action,
+            )
+            signal["action"] = "BUY"
+            signal["confidence"] = 1.0
+            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) > 0.5%. Forced BUY."
+        elif latest_roc < -0.5 and current_position_size > 0.0 and action != "SELL":
+            logger.warning(
+                "[%s] ROC is %.2f%% < -0.5%% but LLM returned %s — overriding to SELL.",
+                self.name, latest_roc, action,
+            )
+            signal["action"] = "SELL"
+            signal["confidence"] = 1.0
+            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) < -0.5%. Forced SELL."
 
         # ── Hard action guard ──────────────────────────────────────────────────
         # Safety net: even if the LLM ignores the position-context instruction,
@@ -246,9 +255,8 @@ class OllamaAgentMixin(BaseAgent):
                 f"{signal.get('reason', '')}"
             )
 
-        # Attach volume conviction metadata for dashboard display.
-        signal["volume_ratio"]  = round(volume_ratio, 2)
-        signal["conviction"]    = conviction_label
+        # Attach ROC momentum metadata for dashboard display.
+        signal["roc_5"] = round(latest_roc, 2)
 
         logger.info("[%s] Final signal: %s", self.name, signal)
         return signal
@@ -285,7 +293,7 @@ class OllamaAgentMixin(BaseAgent):
             Multi-line Markdown table string ready for embedding in a prompt.
         """
         columns_of_interest = [
-            "close", "volume",
+            "close", "ROC_5", "volume",
             "RSI_14",
             "MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9",
             "EMA_20", "EMA_50",

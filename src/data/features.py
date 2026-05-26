@@ -100,6 +100,10 @@ class FeatureEngineer:
         enriched.ta.atr(length=ATR_PERIOD, append=True)
         logger.debug("ATR_%d calculated.", ATR_PERIOD)
 
+        # ── ROC (5-period) ───────────────────────────────────────────────────
+        enriched["ROC_5"] = ((enriched["close"] - enriched["close"].shift(5)) / enriched["close"].shift(5)) * 100
+        logger.debug("ROC_5 calculated.")
+
         rows_before = len(enriched)
         enriched.dropna(inplace=True)
         rows_dropped = rows_before - len(enriched)

@@ -138,7 +138,7 @@ class OllamaAgentMixin(BaseAgent):
 
         # ── Rate-of-Change (ROC) Momentum Analysis ───────────────────────────
         # Retrieve pre-computed ROC_5 (5-period Price Rate-of-Change) from the latest candle.
-        # This tells us if price accelerated upward (>0.5%) or dropped (< -0.5%).
+        # This tells us if price accelerated upward (>0.2%) or dropped (< -0.2%).
         latest_roc: float = 0.0
         if "ROC_5" in market_data.columns:
             latest_roc = float(latest["ROC_5"])
@@ -159,10 +159,9 @@ class OllamaAgentMixin(BaseAgent):
         roc_momentum_block = (
             f"CRITICAL \u2014 MOMENTUM ANALYSIS:\n"
             f"  Current 5-period Price Rate-of-Change (ROC) = {latest_roc:.2f}%\n"
-            f"  You are a Momentum Trader. Evaluate the current 5-period Price Rate-of-Change (ROC). "
-            f"If the price is accelerating (ROC > 0.5%), issue a BUY signal immediately. "
-            f"If the price is decelerating (ROC < -0.5%), issue a SELL signal immediately. "
-            f"Trade the price action itself, do not wait for volume confirmation."
+            f"  You are an aggressive Momentum Trader. The threshold for action is now 0.2% ROC. "
+            f"If price movement is > 0.2% (acceleration), BUY. If < -0.2% (deceleration), SELL. "
+            f"Do not be overly cautious; trade the momentum."
         )
 
         # ── Position-context injection ─────────────────────────────────────────
@@ -210,25 +209,25 @@ class OllamaAgentMixin(BaseAgent):
 
         # ── Aggressive Momentum Strategy Override ───────────────────────────
         # Ensure we enforce the mathematical ROC trigger on the final signal.
-        # If ROC > 0.5% and position size is flat: force BUY.
-        # If ROC < -0.5% and position size is long: force SELL.
+        # If ROC > 0.2% and position size is flat: force BUY.
+        # If ROC < -0.2% and position size is long: force SELL.
         action = signal.get("action", "HOLD")
-        if latest_roc > 0.5 and current_position_size <= 0.0 and action != "BUY":
+        if latest_roc > 0.2 and current_position_size <= 0.0 and action != "BUY":
             logger.warning(
-                "[%s] ROC is %.2f%% > 0.5%% but LLM returned %s — overriding to BUY.",
+                "[%s] ROC is %.2f%% > 0.2%% but LLM returned %s — overriding to BUY.",
                 self.name, latest_roc, action,
             )
             signal["action"] = "BUY"
             signal["confidence"] = 1.0
-            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) > 0.5%. Forced BUY."
-        elif latest_roc < -0.5 and current_position_size > 0.0 and action != "SELL":
+            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) > 0.2%. Forced BUY."
+        elif latest_roc < -0.2 and current_position_size > 0.0 and action != "SELL":
             logger.warning(
-                "[%s] ROC is %.2f%% < -0.5%% but LLM returned %s — overriding to SELL.",
+                "[%s] ROC is %.2f%% < -0.2%% but LLM returned %s — overriding to SELL.",
                 self.name, latest_roc, action,
             )
             signal["action"] = "SELL"
             signal["confidence"] = 1.0
-            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) < -0.5%. Forced SELL."
+            signal["reason"] = f"[ROC Momentum Override] ROC ({latest_roc:.2f}%) < -0.2%. Forced SELL."
 
         # ── Hard action guard ──────────────────────────────────────────────────
         # Safety net: even if the LLM ignores the position-context instruction,

@@ -47,11 +47,10 @@ logging.basicConfig(level=logging.WARNING)
 
 # ── Agent metadata ─────────────────────────────────────────────────────────────
 AGENT_META = {
-    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer","executes":True},
-    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith","executes":False},
-    "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis", "executes":False},
+    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer"},
+    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith"},
+    "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis"},
 }
-EXEC_AGENT = "DimmerForce"   # the sole order-executing agent
 
 
 # ── Session state initialisation ───────────────────────────────────────────────
@@ -81,6 +80,8 @@ def _init():
         "initial_btc_price": None,
         # per-agent simulated equity (starts at each agent's allocation).
         "agent_equity": {k: 200.0 for k in AGENT_META},
+        # per-agent simulated position sizes (starts at 0.0 units).
+        "agent_positions": {k: 0.0 for k in AGENT_META},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -341,57 +342,14 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
         st.session_state.initial_btc_price = current_price
         _log(f"Buy&Hold baseline set: ${current_price:,.2f}", "info")
 
-    # 2. Fetch live position size for position-aware signal generation
-    # Fetch the current base asset balance (e.g. SOL, BTC) so agents know
-    # whether they hold an open position before deciding to BUY or SELL.
-    base_asset = symbol.split("/")[0]   # e.g. "SOL" from "SOL/USDT"
-    current_position_size = 0.0
-    try:
-        broker = _get_broker()
-        raw_balance = broker.get_free_balance(base_asset)
-
-        # ── Dust filter ───────────────────────────────────────────────────────
-        # Exchange balances can contain sub-lot "dust" (e.g. 0.00000174 BTC)
-        # that is smaller than Binance's minimum sellable lot size.  If the
-        # agent treats dust as an open position it will try to SELL it, the
-        # broker will reject the order, and the session enters an infinite
-        # fail loop.  Zeroing out dust restores a clean FLAT state so the
-        # agent can place fresh BUY orders.
-        #
-        # Thresholds are set to the exchange minimum lot for each asset class:
-        #   BTC  → 0.00001  (Binance step size)
-        #   High-value coins (ETH, BNB, SOL, XRP, DOGE) → 0.01
-        _DUST_THRESHOLDS: dict[str, float] = {
-            "BTC":  0.00001,   # Binance BTC/USDT min lot size
-        }
-        # Default threshold for all altcoins not explicitly listed above
-        _dust_threshold = _DUST_THRESHOLDS.get(base_asset, 0.01)
-
-        if raw_balance < _dust_threshold:
-            if raw_balance > 0:
-                _log(
-                    f"Dust filter: {base_asset}={raw_balance:.8f} < "
-                    f"threshold {_dust_threshold} — treating as FLAT.",
-                    "info",
-                )
-            current_position_size = 0.0
-        else:
-            current_position_size = raw_balance
-
-        _log(
-            f"Position check: {base_asset}={current_position_size:.8f} "
-            f"({'OPEN' if current_position_size > 0 else 'FLAT'})",
-            "info",
-        )
-    except Exception as exc:
-        _log(f"Position fetch failed ({base_asset}): {exc} — defaulting to FLAT.", "err")
-
-    # 3. Agent signals + signal counter update
+    # 2. Agent signals + signal counter update
     agents_map = {"DimmerForce": DimmerForceAgent(), "Zenith": ZenithAgent(), "Aegis": AegisAgent()}
     enriched_df = st.session_state.enriched_df
     for name, agent in agents_map.items():
         try:
-            sig = agent.generate_signal(enriched_df, current_position_size=current_position_size)
+            # Pass the agent's independent virtual position size
+            pos_size = st.session_state.agent_positions.get(name, 0.0)
+            sig = agent.generate_signal(enriched_df, current_position_size=pos_size)
             st.session_state.signals[name] = sig
             st.session_state.errors[name] = None
             action = sig["action"]
@@ -405,39 +363,32 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
             st.session_state.errors[name] = str(exc)
             _log(f"[{name}] agent error: {exc}", "err")
 
-    # 3. Execute order via DimmerForce signal
-    exec_signal = st.session_state.signals.get(EXEC_AGENT)
-    if exec_signal:
-        agent_capital = st.session_state.agent_equity.get(EXEC_AGENT, 200.0)
-        _execute_testnet_order(exec_signal, symbol, agent_capital)
+    # 3. Execute orders autonomously for each agent
+    for name in AGENT_META.keys():
+        sig = st.session_state.signals.get(name)
+        if sig:
+            _execute_testnet_order(name, sig, symbol)
 
     # 4. Append performance snapshot for the equity chart
     init_price = st.session_state.initial_btc_price or current_price
-    # Buy&Hold equity: normalise current price to starting allocation of $50
+    # Buy&Hold equity: normalise current price to starting allocation of $200
     buy_hold_equity = (current_price / init_price) * 200.0
 
-    # Simulated advisory equity: +0.1% on correct-direction signal, -0.05% on wrong
-    # This is a lightweight paper-equity proxy for Zenith and Aegis (advisory only).
-    # DimmerForce equity is derived from the live testnet balance when available.
-    for name in ["Zenith", "Aegis"]:
-        sig = st.session_state.signals.get(name)
-        if sig:
-            act = sig.get("action", "HOLD")
-            price_change_pct = (current_price - init_price) / init_price
-            if act == "BUY" and price_change_pct > 0:
-                st.session_state.agent_equity[name] *= 1.001
-            elif act == "SELL" and price_change_pct < 0:
-                st.session_state.agent_equity[name] *= 1.001
-            elif act in ("BUY", "SELL"):
-                st.session_state.agent_equity[name] *= 0.9995
+    # Calculate total equity for each agent: cash + position_value
+    agent_total_equity = {}
+    for name in AGENT_META.keys():
+        cash = st.session_state.agent_equity.get(name, 200.0)
+        pos = st.session_state.agent_positions.get(name, 0.0)
+        total_eq = cash + (pos * current_price)
+        agent_total_equity[name] = total_eq
 
     st.session_state.performance_history.append({
         "timestamp": datetime.now(timezone.utc).strftime("%H:%M"),
         "btc_price": current_price,
         "buy_hold": round(buy_hold_equity, 4),
-        "DimmerForce": round(st.session_state.agent_equity["DimmerForce"], 4),
-        "Zenith":      round(st.session_state.agent_equity["Zenith"], 4),
-        "Aegis":       round(st.session_state.agent_equity["Aegis"], 4),
+        "DimmerForce": round(agent_total_equity["DimmerForce"], 4),
+        "Zenith":      round(agent_total_equity["Zenith"], 4),
+        "Aegis":       round(agent_total_equity["Aegis"], 4),
     })
 
     st.session_state.tick_count += 1
@@ -445,31 +396,33 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     _log(f"Tick #{st.session_state.tick_count} complete in {st.session_state.last_tick_s:.1f}s", "info")
 
 
-def _execute_testnet_order(signal: dict, symbol: str, agent_capital: float) -> None:
-    """Translates a DimmerForce signal into a testnet order.
+def _execute_testnet_order(agent_name: str, signal: dict, symbol: str) -> None:
+    """Translates an agent's signal into a testnet order.
 
-    Trade size is calculated against ``agent_capital`` — the dashboard's
-    simulated equity — NOT the raw broker USDT balance.  This enforces
-    strict capital isolation so a testnet account with $85,000 still
-    sizes trades as if only ``agent_capital`` dollars are available.
+    Trade size is calculated against the agent's simulated equity —
+    NOT the raw broker USDT balance. This enforces strict capital isolation
+    so a testnet account with $85,000 still sizes trades as if only
+    the agent's equity is available.
     """
     from src.execution.broker import BrokerError
     from src.execution.risk_manager import RiskManager
 
     action = signal.get("action", "HOLD")
     if action == "HOLD":
-        _log(f"[{EXEC_AGENT}] HOLD — no order placed.", "info")
+        _log(f"[{agent_name}] HOLD — no order placed.", "info")
         return
+
+    agent_capital = st.session_state.agent_equity.get(agent_name, 200.0)
+    current_price = st.session_state.last_price or 0.0
 
     try:
         broker = _get_broker()
-        current_price = st.session_state.last_price or 0.0
 
         if action == "BUY":
             # Guard: simulated capital must be meaningful before placing an order.
             if agent_capital < 5.0:
                 _log(
-                    f"[{EXEC_AGENT}] BUY skipped — simulated capital too low "
+                    f"[{agent_name}] BUY skipped — simulated capital too low "
                     f"(${agent_capital:.2f})",
                     "err",
                 )
@@ -483,64 +436,72 @@ def _execute_testnet_order(signal: dict, symbol: str, agent_capital: float) -> N
                 signal_action="BUY",
                 current_price=current_price,
                 atr=atr if atr > 0 else current_price * 0.003,
-                # ── STRICT CAPITAL ISOLATION ───────────────────────────────
-                # Use the dashboard's simulated equity, NOT the broker balance.
-                # This guarantees trade sizes are anchored to the $200 budget,
-                # regardless of how large the testnet account actually is.
+                # STRICT CAPITAL ISOLATION
+                # Use the agent's individual simulated equity (cash balance).
                 available_capital=agent_capital,
             )
             units = metrics.get("units", 0.0)
             cost  = metrics.get("cost_usdt", 0.0)
 
             if units <= 0:
-                _log(f"[{EXEC_AGENT}] BUY skipped — RiskManager returned 0 units.", "err")
+                _log(f"[{agent_name}] BUY skipped — RiskManager returned 0 units.", "err")
                 return
 
             _log(
-                f"[{EXEC_AGENT}] Placing MARKET BUY {units:.8f} {symbol} "
+                f"[{agent_name}] Placing MARKET BUY {units:.8f} {symbol} "
                 f"@ ~${current_price:,.2f}  (capital=${agent_capital:.2f}, cost=${cost:.2f})",
                 "buy",
             )
             order = broker.execute_order(symbol=symbol, side="buy", amount=units)
-            _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "buy")
+            _log(f"[{agent_name}] Order filled — id={order.get('id')} status={order.get('status')}", "buy")
 
-            # Deduct actual cost from simulated equity so the dashboard tracks
-            # realistic balance drawdown independent of the broker balance.
-            st.session_state.agent_equity[EXEC_AGENT] = max(0.0, agent_capital - cost)
+            # Deduct actual cost from simulated cash equity.
+            st.session_state.agent_equity[agent_name] = max(0.0, agent_capital - cost)
+            st.session_state.agent_positions[agent_name] = st.session_state.agent_positions.get(agent_name, 0.0) + units
             _log(
-                f"[{EXEC_AGENT}] Simulated equity updated: "
-                f"${agent_capital:.2f} → ${st.session_state.agent_equity[EXEC_AGENT]:.2f}",
+                f"[{agent_name}] Simulated cash equity updated: "
+                f"${agent_capital:.2f} → ${st.session_state.agent_equity[agent_name]:.2f}",
                 "info",
             )
 
         elif action == "SELL":
-            base_ticker = symbol.split("/")[0]  # e.g. "BTC"
-            base_balance = broker.get_free_balance(base_ticker)
-            if base_balance <= 0.0:
-                _log(f"[{EXEC_AGENT}] SELL skipped — no {base_ticker} balance to sell.", "err")
+            position_size = st.session_state.agent_positions.get(agent_name, 0.0)
+            if position_size <= 0.0:
+                _log(f"[{agent_name}] SELL skipped — no virtual position to sell.", "err")
                 return
 
-            sell_value = base_balance * current_price
+            base_ticker = symbol.split("/")[0]  # e.g. "BTC"
+            broker_balance = broker.get_free_balance(base_ticker)
+            
+            # Cap the physical order amount to what's actually available on the testnet account
+            # to prevent insufficient balance errors due to slippage/fees.
+            amount_to_sell = min(position_size, broker_balance)
+            if amount_to_sell <= 0.0:
+                _log(f"[{agent_name}] SELL skipped — physical {base_ticker} balance is 0.", "err")
+                return
+
+            sell_value = position_size * current_price
             _log(
-                f"[{EXEC_AGENT}] Placing MARKET SELL {base_balance:.8f} {symbol} "
-                f"@ ~${current_price:,.2f}  (est. return=${sell_value:.2f})",
+                f"[{agent_name}] Placing MARKET SELL {amount_to_sell:.8f} {symbol} "
+                f"@ ~${current_price:,.2f} (est. return=${sell_value:.2f})",
                 "sell",
             )
-            order = broker.execute_order(symbol=symbol, side="sell", amount=base_balance)
-            _log(f"[{EXEC_AGENT}] Order filled — id={order.get('id')} status={order.get('status')}", "sell")
+            order = broker.execute_order(symbol=symbol, side="sell", amount=amount_to_sell)
+            _log(f"[{agent_name}] Order filled — id={order.get('id')} status={order.get('status')}", "sell")
 
-            # Credit estimated USDT proceeds back to the simulated equity.
-            st.session_state.agent_equity[EXEC_AGENT] = agent_capital + sell_value
+            # Credit estimated USDT proceeds back to simulated cash equity.
+            st.session_state.agent_equity[agent_name] = agent_capital + sell_value
+            st.session_state.agent_positions[agent_name] = 0.0
             _log(
-                f"[{EXEC_AGENT}] Simulated equity updated: "
-                f"${agent_capital:.2f} → ${st.session_state.agent_equity[EXEC_AGENT]:.2f}",
+                f"[{agent_name}] Simulated cash equity updated: "
+                f"${agent_capital:.2f} → ${st.session_state.agent_equity[agent_name]:.2f}",
                 "info",
             )
 
     except BrokerError as exc:
-        _log(f"[{EXEC_AGENT}] Broker error: {exc}", "err")
+        _log(f"[{agent_name}] Broker error: {exc}", "err")
     except Exception as exc:
-        _log(f"[{EXEC_AGENT}] Unexpected execution error: {exc}", "err")
+        _log(f"[{agent_name}] Unexpected execution error: {exc}", "err")
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -587,8 +548,7 @@ with st.sidebar:
                     f'₿ BTC: <b style="color:#fbbf24;">{b["BTC"]:.8f}</b></div>', unsafe_allow_html=True)
 
     st.markdown('<div style="font-size:10px;color:#1f2937;margin-top:12px;line-height:1.7;">'
-                f'⚡ Exec Agent: <b>{EXEC_AGENT}</b><br>'
-                '📊 Advisory: Zenith, Aegis<br>'
+                '⚡ Execution: <b>Autonomous (All Agents)</b><br>'
                 '🔒 Keys from .env — never logged</div>', unsafe_allow_html=True)
 
 
@@ -598,8 +558,7 @@ st.markdown('<h1 style="font-size:32px;font-weight:800;color:#e2e8f0;margin-bott
             '<span class="mode-badge" style="font-size:14px;">🌐 TESTNET</span></h1>'
             '<p style="color:#374151;font-size:13px;margin-bottom:20px;">'
             'Session-based live trading · Gemma 4 × 3 personas · '
-            f'Execution: <b style="color:#818cf8;">{EXEC_AGENT}</b> · '
-            'Advisory: <b style="color:#34d399;">Zenith</b> + <b style="color:#f472b6;">Aegis</b></p>',
+            'Execution: <b style="color:#6366f1;">Autonomous</b> (DimmerForce, Zenith, Aegis)</p>',
             unsafe_allow_html=True)
 
 # ── Global metrics row ─────────────────────────────────────────────────────────
@@ -678,8 +637,9 @@ with ctrl_left:
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
                 st.session_state.agent_equity        = {k: 200.0 for k in AGENT_META}
+                st.session_state.agent_positions     = {k: 0.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
-                     f"symbol={symbol}  agent={EXEC_AGENT}", "info")
+                     f"symbol={symbol}  agents=Autonomous Loop", "info")
                 st.rerun()
             except Exception as exc:
                 st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid testnet keys.")
@@ -726,10 +686,8 @@ for i, agent_name in enumerate(agent_names):
     meta   = AGENT_META[agent_name]
     signal = st.session_state.signals.get(agent_name)
     error  = st.session_state.errors.get(agent_name)
-    is_exec = meta["executes"]
-
     with agent_cols[i]:
-        exec_label = ' <span style="font-size:10px;background:#1e3a5f;color:#60a5fa;padding:2px 8px;border-radius:10px;">EXECUTES</span>' if is_exec else ' <span style="font-size:10px;background:#1c1208;color:#fbbf24;padding:2px 8px;border-radius:10px;">ADVISORY</span>'
+        exec_label = ' <span style="font-size:10px;background:#064e3b;color:#34d399;padding:2px 8px;border-radius:10px;">ACTIVE TRADER</span>'
         st.markdown(
             f'<div class="agent-card {meta["card"]}">'
             f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
@@ -758,7 +716,13 @@ for i, agent_name in enumerate(agent_names):
         b_cnt = counts.get("BUY", 0)
         s_cnt = counts.get("SELL", 0)
         h_cnt = counts.get("HOLD", 0)
-        equity = st.session_state.agent_equity.get(agent_name, 200.0)
+        
+        # Total equity = cash + (position_size * current_price)
+        cash = st.session_state.agent_equity.get(agent_name, 200.0)
+        pos = st.session_state.agent_positions.get(agent_name, 0.0)
+        current_price = st.session_state.last_price or 0.0
+        equity = cash + (pos * current_price)
+        
         pnl    = equity - 200.0
         pnl_color = "#34d399" if pnl >= 0 else "#f87171"
         pnl_sign  = "+" if pnl >= 0 else ""
@@ -781,26 +745,7 @@ for i, agent_name in enumerate(agent_names):
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Comparison matrix ──────────────────────────────────────────────────────────
-if any(s is not None for s in st.session_state.signals.values()):
-    st.markdown("---")
-    st.markdown('<div style="font-size:10px;font-weight:600;color:#374151;text-transform:uppercase;'
-                'letter-spacing:2px;margin-bottom:10px;">Consensus Matrix</div>', unsafe_allow_html=True)
-    cm_cols = st.columns(3)
-    for i, (name, meta) in enumerate(AGENT_META.items()):
-        sig = st.session_state.signals.get(name)
-        with cm_cols[i]:
-            if sig:
-                action = sig.get("action","—")
-                conf   = sig.get("confidence", 0.0)
-                color  = {"BUY":"#34d399","SELL":"#f87171"}.get(action,"#fbbf24")
-                st.markdown(
-                    f'<div style="text-align:center;padding:12px;background:#0a101e;'
-                    f'border-radius:10px;border:1px solid #1a2740;">'
-                    f'<div style="font-size:11px;color:#374151;">{name}</div>'
-                    f'<div style="font-size:24px;font-weight:800;color:{color};font-family:monospace;">{action}</div>'
-                    f'<div style="font-size:12px;color:#4b5563;">{int(conf*100)}%</div></div>',
-                    unsafe_allow_html=True)
+
 
 # ── Session loop: sleep then rerun ────────────────────────────────────────────
 if st.session_state.session_active:

@@ -274,9 +274,10 @@ def _build_performance_chart() -> go.Figure | None:
             line=dict(color=color, width=width, dash=dash),
         ))
 
-    # Dotted horizontal baseline at starting allocation ($50)
+    starting_allocation = df_equity[0] if df_equity else 200.0
+    # Dotted horizontal baseline at starting allocation
     fig.add_hline(
-        y=200.0,
+        y=starting_allocation,
         line_color="rgba(148,163,184,0.2)",
         line_dash="dot",
         line_width=1,
@@ -367,12 +368,18 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     for name in AGENT_META.keys():
         sig = st.session_state.signals.get(name)
         if sig:
-            _execute_testnet_order(name, sig, symbol)
+            _execute_order(name, sig, symbol)
 
     # 4. Append performance snapshot for the equity chart
     init_price = st.session_state.initial_btc_price or current_price
-    # Buy&Hold equity: normalise current price to starting allocation of $200
-    buy_hold_equity = (current_price / init_price) * 200.0
+    # Fetch actual starting allocation for Buy&Hold baseline
+    starting_alloc = 200.0
+    if st.session_state.performance_history:
+        starting_alloc = st.session_state.performance_history[0].get("DimmerForce", 200.0)
+    else:
+        starting_alloc = st.session_state.agent_equity.get("DimmerForce", 200.0)
+
+    buy_hold_equity = (current_price / init_price) * starting_alloc
 
     # Calculate total equity for each agent: cash + position_value
     agent_total_equity = {}
@@ -396,13 +403,12 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     _log(f"Tick #{st.session_state.tick_count} complete in {st.session_state.last_tick_s:.1f}s", "info")
 
 
-def _execute_testnet_order(agent_name: str, signal: dict, symbol: str) -> None:
-    """Translates an agent's signal into a testnet order.
+def _execute_order(agent_name: str, signal: dict, symbol: str) -> None:
+    """Translates an agent's signal into a broker order.
 
     Trade size is calculated against the agent's simulated equity —
     NOT the raw broker USDT balance. This enforces strict capital isolation
-    so a testnet account with $85,000 still sizes trades as if only
-    the agent's equity is available.
+    so trades are sized precisely against the agent's virtual equity pool.
     """
     from src.execution.broker import BrokerError
     from src.execution.risk_manager import RiskManager
@@ -504,19 +510,44 @@ def _execute_testnet_order(agent_name: str, signal: dict, symbol: str) -> None:
         _log(f"[{agent_name}] Unexpected execution error: {exc}", "err")
 
 
+# Try to fetch connection mode dynamically from the broker
+try:
+    broker_instance = _get_broker()
+    is_sandbox = broker_instance.sandbox_mode
+except Exception:
+    is_sandbox = True
+
+# Try to fetch live balance at startup if not already loaded and session not active
+if not st.session_state.session_active and not st.session_state.get("live_balance_loaded", False):
+    try:
+        real_usdt = broker_instance.get_free_balance("USDT")
+        allocated = real_usdt / 3.0
+        for k in AGENT_META:
+            st.session_state.agent_equity[k] = allocated
+        st.session_state.live_balance_loaded = True
+        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT ({allocated:,.2f} USDT per agent).", "info")
+    except Exception as exc:
+        pass
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ NexusQuant")
     st.markdown('<div style="color:#374151;font-size:12px;margin-bottom:16px;">Alpha Arena · v0.7 · Session Trading</div>',
                 unsafe_allow_html=True)
 
-    # Strict mode indicator — no toggle
-    st.markdown('<div class="mode-badge">🌐 BINANCE TESTNET</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:11px;color:#374151;margin:8px 0 16px;">Orders route to testnet.binance.vision<br>Keys loaded from local .env</div>',
-                unsafe_allow_html=True)
+    # Dynamic network mode indicator
+    if is_sandbox:
+        st.markdown('<div class="mode-badge">🌐 BINANCE TESTNET</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:11px;color:#374151;margin:8px 0 16px;">Orders route to testnet.binance.vision<br>Keys loaded from local .env</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="mode-badge" style="background:#450a0a;color:#f87171;border:1px solid #dc2626;">🔴 LIVE MAINNET</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:11px;color:#f87171;margin:8px 0 16px;"><b>REAL MONEY LIVE TRADING ACTIVE</b><br>Orders route to api.binance.com</div>',
+                    unsafe_allow_html=True)
 
     # Balance check
-    if st.button("🔍 Check Testnet Balance", key="check_bal"):
+    btn_label = "🔍 Check Testnet Balance" if is_sandbox else "🔍 Check Live Balance"
+    if st.button(btn_label, key="check_bal"):
         with st.spinner("Connecting…"):
             try:
                 b = _get_broker()
@@ -524,7 +555,8 @@ with st.sidebar:
                 c = b.get_free_balance("BTC")
                 st.session_state.testnet_balance = {"USDT": u, "BTC": c}
                 st.success(f"USDT: {u:,.4f}\nBTC: {c:.8f}")
-                _log(f"Balance check — USDT={u:,.4f}  BTC={c:.8f}", "info")
+                mode_label = "Testnet" if is_sandbox else "Mainnet"
+                _log(f"Balance check ({mode_label}) — USDT={u:,.4f}  BTC={c:.8f}", "info")
             except Exception as exc:
                 st.error(f"Connection failed: {exc}")
 
@@ -553,12 +585,13 @@ with st.sidebar:
 
 
 # ── Header ─────────────────────────────────────────────────────────────────────
-st.markdown('<h1 style="font-size:32px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">'
-            '⚡ NexusQuant <span style="color:#6366f1;">Alpha Arena</span> '
-            '<span class="mode-badge" style="font-size:14px;">🌐 TESTNET</span></h1>'
-            '<p style="color:#374151;font-size:13px;margin-bottom:20px;">'
-            'Session-based live trading · Gemma 4 × 3 personas · '
-            'Execution: <b style="color:#6366f1;">Autonomous</b> (DimmerForce, Zenith, Aegis)</p>',
+badge_html = '<span class="mode-badge" style="font-size:14px;">🌐 TESTNET</span>' if is_sandbox else '<span class="mode-badge" style="font-size:14px;background:#450a0a;color:#f87171;border:1px solid #dc2626;">🔴 LIVE MAINNET</span>'
+st.markdown(f'<h1 style="font-size:32px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">'
+            f'⚡ NexusQuant <span style="color:#6366f1;">Alpha Arena</span> '
+            f'{badge_html}</h1>'
+            f'<p style="color:#374151;font-size:13px;margin-bottom:20px;">'
+            f'Session-based live trading · Gemma 4 × 3 personas · '
+            f'Execution: <b style="color:#6366f1;">Autonomous</b> (DimmerForce, Zenith, Aegis)</p>',
             unsafe_allow_html=True)
 
 # ── Global metrics row ─────────────────────────────────────────────────────────
@@ -625,7 +658,10 @@ with ctrl_left:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("▶  Start Trading Session", key="start_session"):
             try:
-                _get_broker()   # validate keys before starting
+                broker = _get_broker()   # validate credentials and fetch broker
+                real_usdt = broker.get_free_balance("USDT")
+                allocated = real_usdt / 3.0
+
                 st.session_state.session_active      = True
                 st.session_state.session_start_ts    = time.time()
                 st.session_state.session_duration_h  = session_hours
@@ -636,10 +672,11 @@ with ctrl_left:
                 st.session_state.signal_counts       = {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META}
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
-                st.session_state.agent_equity        = {k: 200.0 for k in AGENT_META}
+                st.session_state.agent_equity        = {k: allocated for k in AGENT_META}
                 st.session_state.agent_positions     = {k: 0.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agents=Autonomous Loop", "info")
+                _log(f"Wallet balance loaded: {real_usdt:,.2f} USDT. Allocated {allocated:,.2f} USDT per agent.", "info")
                 st.rerun()
             except Exception as exc:
                 st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid testnet keys.")
@@ -723,7 +760,14 @@ for i, agent_name in enumerate(agent_names):
         current_price = st.session_state.last_price or 0.0
         equity = cash + (pos * current_price)
         
-        pnl    = equity - 200.0
+        # Calculate PnL against actual starting allocation of this agent
+        starting_alloc = 200.0
+        if st.session_state.performance_history:
+            starting_alloc = st.session_state.performance_history[0].get(agent_name, 200.0)
+        else:
+            starting_alloc = st.session_state.agent_equity.get(agent_name, 200.0)
+            
+        pnl    = equity - starting_alloc
         pnl_color = "#34d399" if pnl >= 0 else "#f87171"
         pnl_sign  = "+" if pnl >= 0 else ""
         st.markdown(

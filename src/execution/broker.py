@@ -1,12 +1,12 @@
 """Binance broker module for NexusQuant.
 
-Translates validated trading signals into real exchange orders via ccxt,
-routed exclusively to the Binance Spot Testnet (sandbox mode).
+Translates validated trading signals into real exchange orders via CCXT,
+routing to either the Binance Spot Testnet (sandbox) or the live Binance Mainnet
+depending on the BINANCE_TESTNET environment variable.
 
 Security contract:
     * API keys are loaded exclusively from environment variables — never
       hardcoded, never logged.
-    * Sandbox mode is enforced in __init__ and cannot be overridden by callers.
     * All order-related errors are caught, logged at ERROR level, and re-raised
       as domain-specific exceptions so the execution layer can respond safely.
 """
@@ -27,63 +27,57 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-TESTNET_API_KEY_ENV: str = "BINANCE_TESTNET_API_KEY"
-TESTNET_SECRET_KEY_ENV: str = "BINANCE_TESTNET_SECRET_KEY"
-DEFAULT_RECV_WINDOW: int = 10_000   # milliseconds — wider window for testnet latency
+DEFAULT_RECV_WINDOW: int = 10_000   # milliseconds — robust against latency
 
 
 class BrokerError(Exception):
     """Base exception for all BinanceBroker errors.
 
-    Wraps ccxt exceptions so callers do not need to import ccxt directly.
+    Wraps CCXT exceptions so callers do not need to import CCXT directly.
     """
 
 
 class BinanceBroker:
-    """Executes trades on the Binance Spot Testnet via ccxt.
+    """Executes trades on the Binance Spot Exchange via CCXT.
 
-    All orders are routed to ``https://testnet.binance.vision`` through
-    ccxt's built-in sandbox mode.  This class MUST NOT be used with mainnet
-    keys — sandbox mode is enforced unconditionally in ``__init__``.
+    Supports both Binance Spot Testnet (sandbox) and live Mainnet based on
+    the `BINANCE_TESTNET` environment variable.
 
     Attributes:
-        exchange: The ccxt ``binance`` exchange instance in sandbox mode.
-        sandbox_mode: Always ``True`` — read-only guard for callers to inspect.
-
-    Example:
-        >>> broker = BinanceBroker()
-        >>> balance = broker.get_free_balance("USDT")
-        >>> print(f"Available USDT: {balance:.2f}")
+        exchange: The CCXT ``binance`` exchange instance.
+        sandbox_mode: True if connected to Binance Testnet, False if Mainnet.
     """
 
     def __init__(self) -> None:
-        """Loads testnet credentials from environment and enables sandbox mode.
+        """Loads credentials from environment and configures sandbox mode.
 
         Raises:
-            BrokerError: If either ``BINANCE_TESTNET_API_KEY`` or
-                ``BINANCE_TESTNET_SECRET_KEY`` environment variables are
-                missing or empty.
-            BrokerError: If the ccxt exchange object cannot be initialised
-                (e.g. network unavailable at startup).
+            BrokerError: If required credentials are missing.
+            BrokerError: If the CCXT exchange object cannot be initialised.
         """
-        api_key    = os.getenv(TESTNET_API_KEY_ENV, "").strip()
-        secret_key = os.getenv(TESTNET_SECRET_KEY_ENV, "").strip()
+        is_testnet = os.getenv("BINANCE_TESTNET", "True").strip().lower() != "false"
+
+        if is_testnet:
+            # Fallback chain for testnet credentials
+            api_key = os.getenv("BINANCE_TESTNET_API_KEY", "").strip() or os.getenv("BINANCE_API_KEY", "").strip()
+            secret_key = os.getenv("BINANCE_TESTNET_SECRET_KEY", "").strip() or os.getenv("BINANCE_SECRET_KEY", "").strip()
+            env_vars_source = "BINANCE_TESTNET_API_KEY / BINANCE_API_KEY"
+        else:
+            # Production Mainnet credentials only
+            api_key = os.getenv("BINANCE_API_KEY", "").strip()
+            secret_key = os.getenv("BINANCE_SECRET_KEY", "").strip()
+            env_vars_source = "BINANCE_API_KEY"
 
         if not api_key or not secret_key:
-            missing = []
-            if not api_key:
-                missing.append(TESTNET_API_KEY_ENV)
-            if not secret_key:
-                missing.append(TESTNET_SECRET_KEY_ENV)
             raise BrokerError(
-                f"Missing required environment variables: {missing}. "
-                f"Copy .env.example → .env and fill in your Binance Testnet keys."
+                f"Missing credentials from environment ({env_vars_source}). "
+                f"Please ensure your keys are configured correctly in the .env file."
             )
 
-        # Keys are intentionally never logged — only their presence is confirmed.
+        mode_str = "TESTNET (Sandbox)" if is_testnet else "MAINNET (Live Production)"
         logger.info(
-            "BinanceBroker: Testnet credentials loaded from environment "
-            "(key length=%d, secret length=%d).",
+            "BinanceBroker: Initialising in %s mode (key length=%d, secret length=%d).",
+            mode_str,
             len(api_key),
             len(secret_key),
         )
@@ -96,27 +90,30 @@ class BinanceBroker:
                 "options": {
                     "recvWindow":              DEFAULT_RECV_WINDOW,
                     "defaultType":             "spot",
-                    # Automatically measure and compensate for the difference
-                    # between the local system clock and the Binance server time.
-                    # Prevents error -1021 (Timestamp for this request is outside
-                    # of the recvWindow) caused by local clock drift.
+                    # Automatically measure and compensate for clock drift.
                     "adjustForTimeDifference": True,
                 },
             })
 
-            # ── CRITICAL: enforce sandbox mode unconditionally ────────────────
-            self.exchange.set_sandbox_mode(True)
-            self.sandbox_mode: bool = True
+            # Configure sandbox / testnet mode
+            self.exchange.set_sandbox_mode(is_testnet)
+            self.sandbox_mode: bool = is_testnet
+
+            endpoint = (
+                self.exchange.urls.get("test", {}).get("api", "testnet endpoint")
+                if is_testnet
+                else "https://api.binance.com"
+            )
 
             logger.info(
-                "BinanceBroker initialised — exchange=%s  sandbox=True  "
-                "endpoint=%s",
+                "BinanceBroker successfully initialised — exchange=%s, sandbox=%s, endpoint=%s",
                 self.exchange.id,
-                self.exchange.urls.get("test", {}).get("api", "unknown"),
+                self.sandbox_mode,
+                endpoint,
             )
 
         except ccxt.BaseError as exc:
-            raise BrokerError(f"Failed to initialise ccxt exchange: {exc}") from exc
+            raise BrokerError(f"Failed to initialise CCXT exchange: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,14 +127,15 @@ class BinanceBroker:
                 Defaults to ``"USDT"``.
 
         Returns:
-            Free balance as a ``float``.  Returns ``0.0`` if the currency
+            Free balance as a ``float``. Returns ``0.0`` if the currency
             is not present in the account.
 
         Raises:
             BrokerError: On authentication failure, network error, or any
-                ccxt exception.
+                CCXT exception.
         """
-        logger.info("BinanceBroker: Fetching balance for %s (testnet).", ticker)
+        mode_str = "testnet" if self.sandbox_mode else "mainnet"
+        logger.info("BinanceBroker: Fetching balance for %s on %s.", ticker, mode_str)
         try:
             balance_data = self.exchange.fetch_balance()
             free = float(balance_data.get("free", {}).get(ticker, 0.0))
@@ -146,20 +144,19 @@ class BinanceBroker:
 
         except ccxt.AuthenticationError as exc:
             msg = (
-                f"Authentication failed for Binance Testnet. "
-                f"Check your keys in .env are valid testnet keys "
-                f"(from https://testnet.binance.vision/). Error: {exc}"
+                f"Authentication failed for Binance {mode_str.upper()}. "
+                f"Please check that your API keys are valid. Error: {exc}"
             )
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.NetworkError as exc:
-            msg = f"Network error fetching balance: {exc}"
+            msg = f"Network error fetching balance from Binance {mode_str.upper()}: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.BaseError as exc:
-            msg = f"Unexpected ccxt error fetching balance: {exc}"
+            msg = f"Unexpected CCXT error fetching balance: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
@@ -170,26 +167,26 @@ class BinanceBroker:
         amount: float,
         price: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Places a spot order on the Binance Testnet.
+        """Places a spot order on the configured Binance network.
 
         Creates a **limit order** when ``price`` is provided, or a **market
         order** when ``price`` is ``None``.
 
         Args:
-            symbol: Trading pair in ccxt format (e.g. ``"BTC/USDT"``).
+            symbol: Trading pair in CCXT format (e.g. ``"BTC/USDT"``).
             side: Order direction — ``"buy"`` or ``"sell"`` (case-insensitive).
             amount: Quantity of the base asset to trade (e.g. BTC units).
-            price: Limit price in quote currency (USDT).  ``None`` triggers
+            price: Limit price in quote currency (USDT). ``None`` triggers
                 a market order.
 
         Returns:
-            The full ccxt order response dict containing at minimum:
+            The full CCXT order response dict containing at minimum:
             ``id``, ``status``, ``symbol``, ``side``, ``type``,
             ``amount``, ``price``, ``timestamp``.
 
         Raises:
             BrokerError: On insufficient funds, invalid order parameters,
-                network errors, or any other ccxt exception.
+                network errors, or any other CCXT exception.
             ValueError: If ``side`` is not ``"buy"`` or ``"sell"``.
         """
         side = side.lower()
@@ -200,10 +197,12 @@ class BinanceBroker:
             raise ValueError(f"Order amount must be positive, got {amount}.")
 
         order_type = "limit" if price is not None else "market"
+        mode_str = "TESTNET" if self.sandbox_mode else "MAINNET"
 
         logger.info(
-            "BinanceBroker [TESTNET]: Placing %s %s order — "
+            "BinanceBroker [%s]: Placing %s %s order — "
             "symbol=%s  amount=%.8f  price=%s",
+            mode_str,
             order_type.upper(),
             side.upper(),
             symbol,
@@ -227,8 +226,9 @@ class BinanceBroker:
                 )
 
             logger.info(
-                "BinanceBroker [TESTNET]: Order placed — id=%s  status=%s  "
+                "BinanceBroker [%s]: Order placed — id=%s  status=%s  "
                 "type=%s  side=%s  amount=%.8f  price=%s",
+                mode_str,
                 order.get("id"),
                 order.get("status"),
                 order.get("type"),
@@ -239,29 +239,26 @@ class BinanceBroker:
             return order
 
         except ccxt.InsufficientFunds as exc:
-            msg = (
-                f"Insufficient testnet funds for {side.upper()} {amount} {symbol}. "
-                f"Top up at https://testnet.binance.vision/. Error: {exc}"
-            )
+            msg = f"Insufficient funds on {mode_str} for {side.upper()} {amount} {symbol}. Error: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.InvalidOrder as exc:
-            msg = f"Invalid order parameters (symbol={symbol}, side={side}, amount={amount}, price={price}): {exc}"
+            msg = f"Invalid order parameters on {mode_str} (symbol={symbol}, side={side}, amount={amount}, price={price}): {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.NetworkError as exc:
-            msg = f"Network error placing order on testnet: {exc}"
+            msg = f"Network error placing order on {mode_str}: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.AuthenticationError as exc:
-            msg = f"Authentication error on testnet — check .env keys: {exc}"
+            msg = f"Authentication error on {mode_str} — check configured credentials: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
         except ccxt.BaseError as exc:
-            msg = f"Unexpected ccxt error executing order: {exc}"
+            msg = f"Unexpected CCXT error executing order: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc

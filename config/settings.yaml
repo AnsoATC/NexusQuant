@@ -3,12 +3,12 @@
 # =============================================================================
 
 trading:
-  default_symbol: "BTC/USDT"
+  default_symbol: "SOL/USDT"
   primary_timeframe: "5m"      # Optimised for session-based trading (changed from 1h)
   secondary_timeframe: "15m"
   tertiary_timeframe: "1h"
   default_limit: 500           # Number of OHLCV candles to fetch by default
-  sandbox_mode: true           # Use exchange sandbox/testnet if available
+  sandbox_mode: false          # Use exchange sandbox/testnet if available
   # ── Session-based trading defaults ───────────────────────────────────────
   default_timeframe: "5m"      # Default candle timeframe for the dashboard
   default_tick_interval: 300   # Seconds between each session tick (5 minutes)
@@ -37,9 +37,9 @@ risk:
   max_open_trades: 3                # Maximum concurrent open positions
   
   # ── Lot size & Minimums ──────────────────────────────────────────────────
-  min_notional_usdt: 5.0            # [UPDATED] Binance requires every order to be at least 5 USDT
-  min_lot_size: 0.00001             # Minimum order size in base asset (BTC specific)
-  lot_step_size: 0.00001            # Precision step for order rounding (BTC specific)
+  min_notional_usdt: 5.0            # Binance requires every order to be at least 5 USDT
+  min_lot_size: 0.01                # Minimum order size in base asset (SOL specific)
+  lot_step_size: 0.01               # Precision step for order rounding (SOL specific)
 
 llm:
   model: "gemma4"                   # [UPDATED] Corrected to match your local Ollama setup

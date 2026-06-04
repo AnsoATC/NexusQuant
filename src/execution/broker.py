@@ -55,7 +55,7 @@ class BinanceBroker:
             BrokerError: If required credentials are missing.
             BrokerError: If the CCXT exchange object cannot be initialised.
         """
-        is_testnet = os.getenv("BINANCE_TESTNET", "True").strip().lower() != "false"
+        is_testnet = os.getenv("BINANCE_TESTNET", "False").strip().lower() != "false"
 
         if is_testnet:
             # Fallback chain for testnet credentials

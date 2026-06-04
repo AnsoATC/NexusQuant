@@ -47,9 +47,9 @@ logging.basicConfig(level=logging.WARNING)
 
 # ── Agent metadata ─────────────────────────────────────────────────────────────
 AGENT_META = {
-    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer"},
-    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith"},
-    "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis"},
+    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer", "active": True, "allocation_pct": 1.0},
+    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith", "active": False, "allocation_pct": 0.0},
+    "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis", "active": False, "allocation_pct": 0.0},
 }
 
 
@@ -347,6 +347,8 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     agents_map = {"DimmerForce": DimmerForceAgent(), "Zenith": ZenithAgent(), "Aegis": AegisAgent()}
     enriched_df = st.session_state.enriched_df
     for name, agent in agents_map.items():
+        if not AGENT_META[name].get("active", True):
+            continue
         try:
             # Pass the agent's independent virtual position size
             pos_size = st.session_state.agent_positions.get(name, 0.0)
@@ -364,8 +366,10 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
             st.session_state.errors[name] = str(exc)
             _log(f"[{name}] agent error: {exc}", "err")
 
-    # 3. Execute orders autonomously for each agent
+    # 3. Execute orders autonomously for each active agent
     for name in AGENT_META.keys():
+        if not AGENT_META[name].get("active", True):
+            continue
         sig = st.session_state.signals.get(name)
         if sig:
             _execute_order(name, sig, symbol)
@@ -388,6 +392,34 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
         pos = st.session_state.agent_positions.get(name, 0.0)
         total_eq = cash + (pos * current_price)
         agent_total_equity[name] = total_eq
+
+    # ── Emergency Drawdown stop-loss check ──────────────────────────────
+    # If the total allocated capital ($600 USDT) experiences a maximum drawdown of 5%
+    # (i.e. falls to or below $570 USDT), execute emergency stop-loss.
+    df_equity = agent_total_equity.get("DimmerForce", 0.0)
+    if df_equity <= 570.0:
+        _log(f"[EMERGENCY WARNING] DimmerForce total equity fell to ${df_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
+        # 1. Liquidate open positions on SOL
+        pos_size = st.session_state.agent_positions.get("DimmerForce", 0.0)
+        if pos_size > 0.0:
+            try:
+                _log(f"[EMERGENCY LIQUIDATION] Placing MARKET SELL for {pos_size:.4f} SOL...", "sell")
+                broker = _get_broker()
+                order = broker.execute_order(symbol="SOL/USDT", side="sell", amount=pos_size)
+                _log(f"[EMERGENCY LIQUIDATION] Closed SOL position. Order ID: {order.get('id')}", "sell")
+            except Exception as exc:
+                _log(f"[EMERGENCY LIQUIDATION ERROR] Failed to liquidate SOL position: {exc}", "err")
+            
+            # Reset states
+            st.session_state.agent_positions["DimmerForce"] = 0.0
+            st.session_state.agent_equity["DimmerForce"] += pos_size * current_price
+        
+        # 2. Halt all trading loops and safely log out
+        st.session_state.session_active = False
+        st.session_state.broker = None
+        _log("[EMERGENCY STOP-LOSS TRIGGERED] SOL position liquidated. Trading halted.", "err")
+        st.warning("⚠️ EMERGENCY GLOBAL STOP-LOSS TRIGGERED: DimmerForce equity fell to or below $570.00 (5% drawdown). SOL position liquidated, trading session halted.")
+        st.rerun()
 
     st.session_state.performance_history.append({
         "timestamp": datetime.now(timezone.utc).strftime("%H:%M"),
@@ -521,11 +553,10 @@ except Exception:
 if not st.session_state.session_active and not st.session_state.get("live_balance_loaded", False):
     try:
         real_usdt = broker_instance.get_free_balance("USDT")
-        allocated = real_usdt / 3.0
-        for k in AGENT_META:
-            st.session_state.agent_equity[k] = allocated
+        for k, meta in AGENT_META.items():
+            st.session_state.agent_equity[k] = real_usdt * meta.get("allocation_pct", 1.0/3.0)
         st.session_state.live_balance_loaded = True
-        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT ({allocated:,.2f} USDT per agent).", "info")
+        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT.", "info")
     except Exception as exc:
         pass
 
@@ -564,7 +595,7 @@ with st.sidebar:
     st.markdown("### ⚙️ Market Settings")
     symbol       = st.selectbox(
         "Trading Pair",
-        ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT"],
+        ["SOL/USDT"],
     )
     timeframe    = st.selectbox("Timeframe", ["5m", "15m", "1h", "4h"])
     candle_limit = st.slider("Candles", 60, 300, 100, step=10)
@@ -660,7 +691,6 @@ with ctrl_left:
             try:
                 broker = _get_broker()   # validate credentials and fetch broker
                 real_usdt = broker.get_free_balance("USDT")
-                allocated = real_usdt / 3.0
 
                 st.session_state.session_active      = True
                 st.session_state.session_start_ts    = time.time()
@@ -672,14 +702,18 @@ with ctrl_left:
                 st.session_state.signal_counts       = {k: {"BUY": 0, "SELL": 0, "HOLD": 0} for k in AGENT_META}
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
-                st.session_state.agent_equity        = {k: allocated for k in AGENT_META}
+                st.session_state.agent_equity        = {k: real_usdt * meta.get("allocation_pct", 1.0/3.0) for k, meta in AGENT_META.items()}
                 st.session_state.agent_positions     = {k: 0.0 for k in AGENT_META}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agents=Autonomous Loop", "info")
-                _log(f"Wallet balance loaded: {real_usdt:,.2f} USDT. Allocated {allocated:,.2f} USDT per agent.", "info")
+                
+                # Log detailed allocation information per agent
+                for k, meta in AGENT_META.items():
+                    alloc = st.session_state.agent_equity[k]
+                    _log(f"[{k}] Allocation set to {meta.get('allocation_pct', 0.0)*100:.0f}% (${alloc:,.2f} USDT).", "info")
                 st.rerun()
             except Exception as exc:
-                st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid testnet keys.")
+                st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid keys.")
     else:
         # ── ACTIVE session status ────────────────────────────────────────────
         st.markdown(f'<div class="session-active">'
@@ -724,7 +758,12 @@ for i, agent_name in enumerate(agent_names):
     signal = st.session_state.signals.get(agent_name)
     error  = st.session_state.errors.get(agent_name)
     with agent_cols[i]:
-        exec_label = ' <span style="font-size:10px;background:#064e3b;color:#34d399;padding:2px 8px;border-radius:10px;">ACTIVE TRADER</span>'
+        is_active = meta.get("active", True)
+        if is_active:
+            exec_label = ' <span style="font-size:10px;background:#064e3b;color:#34d399;padding:2px 8px;border-radius:10px;">ACTIVE TRADER</span>'
+        else:
+            exec_label = ' <span style="font-size:10px;background:#374151;color:#94a3b8;padding:2px 8px;border-radius:10px;">DEACTIVATED</span>'
+        
         st.markdown(
             f'<div class="agent-card {meta["card"]}">'
             f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
@@ -735,18 +774,22 @@ for i, agent_name in enumerate(agent_names):
             unsafe_allow_html=True,
         )
 
-        if error:
-            st.markdown(f'<div class="err-box">⚠️ {error}</div>', unsafe_allow_html=True)
-        elif signal is None:
-            st.markdown('<div style="color:#374151;font-size:12px;padding:8px 0;">Awaiting first tick…</div>',
+        if not is_active:
+            st.markdown('<div style="color:#64748b;font-size:12px;padding:8px 0;font-style:italic;">Agent is deactivated.</div>',
                         unsafe_allow_html=True)
         else:
-            action = signal.get("action","HOLD")
-            conf   = float(signal.get("confidence", 0.0))
-            reason = signal.get("reason","—")
-            st.markdown(_badge(action), unsafe_allow_html=True)
-            st.markdown(_conf_bar(conf), unsafe_allow_html=True)
-            st.markdown(f'<div class="reason-box">💬 {reason}</div>', unsafe_allow_html=True)
+            if error:
+                st.markdown(f'<div class="err-box">⚠️ {error}</div>', unsafe_allow_html=True)
+            elif signal is None:
+                st.markdown('<div style="color:#374151;font-size:12px;padding:8px 0;">Awaiting first tick…</div>',
+                            unsafe_allow_html=True)
+            else:
+                action = signal.get("action","HOLD")
+                conf   = float(signal.get("confidence", 0.0))
+                reason = signal.get("reason","—")
+                st.markdown(_badge(action), unsafe_allow_html=True)
+                st.markdown(_conf_bar(conf), unsafe_allow_html=True)
+                st.markdown(f'<div class="reason-box">💬 {reason}</div>', unsafe_allow_html=True)
 
         # ── Signal counters ───────────────────────────────────────────────────
         counts = st.session_state.signal_counts.get(agent_name, {})

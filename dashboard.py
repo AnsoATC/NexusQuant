@@ -58,7 +58,7 @@ def _init():
     defaults = {
         "session_active": False,
         "session_start_ts": None,
-        "session_duration_h": 4.0,
+        "session_duration_h": 6.0,
         "tick_interval_s": 300,
         "tick_count": 0,
         "signals": {k: None for k in AGENT_META},
@@ -601,7 +601,7 @@ with st.sidebar:
     candle_limit = st.slider("Candles", 60, 300, 100, step=10)
 
     st.markdown("### ⏱️ Session Settings")
-    session_hours   = st.number_input("Duration (Hours)",  min_value=0.1, max_value=24.0, value=4.0, step=0.5)
+    session_hours   = st.number_input("Duration (Hours)",  min_value=0.1, max_value=24.0, value=6.0, step=0.5)
     tick_interval_s = st.number_input("Tick Interval (s)", min_value=30,  max_value=3600,  value=300, step=30)
 
     st.markdown("---")
@@ -850,5 +850,5 @@ if st.session_state.session_active:
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown('<div style="text-align:center;font-size:11px;color:#111827;padding:8px 0;">'
-            'NexusQuant Alpha Arena · Binance Testnet · Not Financial Advice</div>',
+            'NexusQuant Alpha Arena · Binance Mainnet · Not Financial Advice</div>',
             unsafe_allow_html=True)

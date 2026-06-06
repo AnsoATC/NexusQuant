@@ -396,15 +396,35 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     # ── Emergency Drawdown stop-loss check ──────────────────────────────
     # If the total allocated capital ($600 USDT) experiences a maximum drawdown of 5%
     # (i.e. falls to or below $570 USDT), execute emergency stop-loss.
-    df_equity = agent_total_equity.get("DimmerForce", 0.0)
-    if df_equity <= 570.0:
-        _log(f"[EMERGENCY WARNING] DimmerForce total equity fell to ${df_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
+    # We query the actual exchange balance for USDT and SOL to calculate absolute Total Equity.
+    try:
+        broker = _get_broker()
+        base_ticker = symbol.split("/")[0]  # "SOL"
+        real_sol_balance = broker.get_free_balance(base_ticker)
+        real_usdt_balance = broker.get_free_balance("USDT")
+        emergency_total_equity = real_usdt_balance + (real_sol_balance * current_price)
+        _log(f"Emergency Check: Exchange USDT={real_usdt_balance:.2f}, SOL={real_sol_balance:.4f} (value=${real_sol_balance * current_price:.2f}), Total Equity=${emergency_total_equity:.2f}", "info")
+    except Exception as exc:
+        # Fallback to virtual tracking if exchange query fails
+        df_cash = st.session_state.agent_equity.get("DimmerForce", 200.0)
+        df_pos = st.session_state.agent_positions.get("DimmerForce", 0.0)
+        emergency_total_equity = df_cash + (df_pos * current_price)
+        _log(f"Exchange query failed during emergency check: {exc}. Falling back to virtual tracking (Total Equity=${emergency_total_equity:.2f}).", "err")
+
+    if emergency_total_equity <= 570.0:
+        _log(f"[EMERGENCY WARNING] DimmerForce total equity fell to ${emergency_total_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
         # 1. Liquidate open positions on SOL
         pos_size = st.session_state.agent_positions.get("DimmerForce", 0.0)
+        broker = _get_broker()
+        if pos_size <= 0.0:
+            try:
+                pos_size = broker.get_free_balance("SOL")
+            except Exception:
+                pos_size = 0.0
+                
         if pos_size > 0.0:
             try:
                 _log(f"[EMERGENCY LIQUIDATION] Placing MARKET SELL for {pos_size:.4f} SOL...", "sell")
-                broker = _get_broker()
                 order = broker.execute_order(symbol="SOL/USDT", side="sell", amount=pos_size)
                 _log(f"[EMERGENCY LIQUIDATION] Closed SOL position. Order ID: {order.get('id')}", "sell")
             except Exception as exc:
@@ -553,10 +573,12 @@ except Exception:
 if not st.session_state.session_active and not st.session_state.get("live_balance_loaded", False):
     try:
         real_usdt = broker_instance.get_free_balance("USDT")
+        real_sol = broker_instance.get_free_balance("SOL")
         for k, meta in AGENT_META.items():
             st.session_state.agent_equity[k] = real_usdt * meta.get("allocation_pct", 1.0/3.0)
+            st.session_state.agent_positions[k] = real_sol * meta.get("allocation_pct", 1.0/3.0)
         st.session_state.live_balance_loaded = True
-        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT.", "info")
+        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT and position {real_sol:.4f} SOL.", "info")
     except Exception as exc:
         pass
 
@@ -691,6 +713,8 @@ with ctrl_left:
             try:
                 broker = _get_broker()   # validate credentials and fetch broker
                 real_usdt = broker.get_free_balance("USDT")
+                base_asset = symbol.split("/")[0]
+                real_sol = broker.get_free_balance(base_asset)
 
                 st.session_state.session_active      = True
                 st.session_state.session_start_ts    = time.time()
@@ -703,14 +727,15 @@ with ctrl_left:
                 st.session_state.performance_history = []
                 st.session_state.initial_btc_price   = None
                 st.session_state.agent_equity        = {k: real_usdt * meta.get("allocation_pct", 1.0/3.0) for k, meta in AGENT_META.items()}
-                st.session_state.agent_positions     = {k: 0.0 for k in AGENT_META}
+                st.session_state.agent_positions     = {k: real_sol * meta.get("allocation_pct", 1.0/3.0) for k, meta in AGENT_META.items()}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
                      f"symbol={symbol}  agents=Autonomous Loop", "info")
                 
                 # Log detailed allocation information per agent
                 for k, meta in AGENT_META.items():
                     alloc = st.session_state.agent_equity[k]
-                    _log(f"[{k}] Allocation set to {meta.get('allocation_pct', 0.0)*100:.0f}% (${alloc:,.2f} USDT).", "info")
+                    pos_alloc = st.session_state.agent_positions[k]
+                    _log(f"[{k}] Allocation set to {meta.get('allocation_pct', 0.0)*100:.0f}% (${alloc:,.2f} USDT, {pos_alloc:.4f} {base_asset}).", "info")
                 st.rerun()
             except Exception as exc:
                 st.error(f"❌ Cannot start session: {exc}\n\nCheck .env has valid keys.")

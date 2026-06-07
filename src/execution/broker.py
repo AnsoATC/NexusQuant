@@ -160,6 +160,47 @@ class BinanceBroker:
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc
 
+    def get_total_balance(self, ticker: str = "USDT") -> float:
+        """Returns the total (free + locked) balance for a given currency.
+
+        Args:
+            ticker: Currency ticker to query (e.g. ``"USDT"``, ``"BTC"``).
+                Defaults to ``"USDT"``.
+
+        Returns:
+            Total balance as a ``float``. Returns ``0.0`` if the currency
+            is not present in the account.
+
+        Raises:
+            BrokerError: On authentication failure, network error, or any
+                CCXT exception.
+        """
+        mode_str = "testnet" if self.sandbox_mode else "mainnet"
+        logger.info("BinanceBroker: Fetching total balance for %s on %s.", ticker, mode_str)
+        try:
+            balance_data = self.exchange.fetch_balance()
+            total = float(balance_data.get("total", {}).get(ticker, 0.0))
+            logger.info("BinanceBroker: Total %s balance = %.6f", ticker, total)
+            return total
+
+        except ccxt.AuthenticationError as exc:
+            msg = (
+                f"Authentication failed for Binance {mode_str.upper()}. "
+                f"Please check that your API keys are valid. Error: {exc}"
+            )
+            logger.error("BinanceBroker: %s", msg)
+            raise BrokerError(msg) from exc
+
+        except ccxt.NetworkError as exc:
+            msg = f"Network error fetching balance from Binance {mode_str.upper()}: {exc}"
+            logger.error("BinanceBroker: %s", msg)
+            raise BrokerError(msg) from exc
+
+        except ccxt.BaseError as exc:
+            msg = f"Unexpected CCXT error fetching balance: {exc}"
+            logger.error("BinanceBroker: %s", msg)
+            raise BrokerError(msg) from exc
+
     def execute_order(
         self,
         symbol: str,
@@ -260,5 +301,25 @@ class BinanceBroker:
 
         except ccxt.BaseError as exc:
             msg = f"Unexpected CCXT error executing order: {exc}"
+            logger.error("BinanceBroker: %s", msg)
+            raise BrokerError(msg) from exc
+
+    def cancel_all_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """Cancels all open orders for the specified symbol.
+
+        Args:
+            symbol: Trading pair (e.g. ``"SOL/USDT"``).
+
+        Returns:
+            List of canceled order objects.
+
+        Raises:
+            BrokerError: If the operation fails.
+        """
+        logger.info("BinanceBroker: Canceling all open orders for %s.", symbol)
+        try:
+            return self.exchange.cancel_all_orders(symbol)
+        except ccxt.BaseError as exc:
+            msg = f"Failed to cancel all orders for {symbol}: {exc}"
             logger.error("BinanceBroker: %s", msg)
             raise BrokerError(msg) from exc

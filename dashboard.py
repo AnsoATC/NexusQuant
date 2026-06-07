@@ -400,14 +400,14 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     # ── Emergency Drawdown stop-loss check ──────────────────────────────
     # If the total allocated capital ($600 USDT) experiences a maximum drawdown of 5%
     # (i.e. falls to or below $570 USDT), execute emergency stop-loss.
-    # We query the actual exchange balance for USDT and SOL to calculate absolute Total Equity.
+    # We query the actual exchange balance for USDT and SOL (using total balance) to calculate absolute Total Equity.
     try:
         broker = _get_broker()
         base_ticker = symbol.split("/")[0]  # "SOL"
-        real_sol_balance = broker.get_free_balance(base_ticker)
-        real_usdt_balance = broker.get_free_balance("USDT")
+        real_sol_balance = broker.get_total_balance(base_ticker)
+        real_usdt_balance = broker.get_total_balance("USDT")
         emergency_total_equity = real_usdt_balance + (real_sol_balance * current_price)
-        _log(f"Emergency Check: Exchange USDT={real_usdt_balance:.2f}, SOL={real_sol_balance:.4f} (value=${real_sol_balance * current_price:.2f}), Total Equity=${emergency_total_equity:.2f}", "info")
+        _log(f"Emergency Check: Exchange Total USDT={real_usdt_balance:.2f}, SOL={real_sol_balance:.4f} (value=${real_sol_balance * current_price:.2f}), Total Equity=${emergency_total_equity:.2f}", "info")
     except Exception as exc:
         # Fallback to virtual tracking if exchange query fails
         df_cash = st.session_state.agent_equity.get(active_agent, 200.0)
@@ -417,27 +417,43 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
 
     if emergency_total_equity <= 570.0:
         _log(f"[EMERGENCY WARNING] {active_agent} total equity fell to ${emergency_total_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
-        # 1. Liquidate open positions on SOL
-        pos_size = st.session_state.agent_positions.get(active_agent, 0.0)
         broker = _get_broker()
-        if pos_size <= 0.0:
+
+        # Step 1: Explicitly cancel all open orders for SOL/USDT to unlock any tied-up funds
+        try:
+            _log("[EMERGENCY LIQUIDATION] Canceling all open orders for SOL/USDT to unlock funds...", "sell")
+            broker.cancel_all_orders("SOL/USDT")
+        except Exception as exc:
+            _log(f"[EMERGENCY LIQUIDATION WARNING] Failed to cancel open orders: {exc}", "err")
+
+        # Step 2: Fetch the fresh updated free SOL balance from exchange
+        try:
+            free_sol_balance = broker.get_free_balance("SOL")
+        except Exception as exc:
+            _log(f"[EMERGENCY LIQUIDATION ERROR] Failed to fetch free SOL balance: {exc}", "err")
+            free_sol_balance = 0.0
+
+        # Step 3: Execute MARKET SELL using only that exact free SOL balance
+        if free_sol_balance > 0.0:
             try:
-                pos_size = broker.get_free_balance("SOL")
-            except Exception:
-                pos_size = 0.0
-                
-        if pos_size > 0.0:
-            try:
-                _log(f"[EMERGENCY LIQUIDATION] Placing MARKET SELL for {pos_size:.4f} SOL...", "sell")
-                order = broker.execute_order(symbol="SOL/USDT", side="sell", amount=pos_size)
-                _log(f"[EMERGENCY LIQUIDATION] Closed SOL position. Order ID: {order.get('id')}", "sell")
+                from src.execution.risk_manager import RiskManager
+                rm = RiskManager()
+                free_sol_balance = rm._truncate_to_step(free_sol_balance, rm.lot_step_size)
+                if free_sol_balance >= rm.min_lot_size:
+                    _log(f"[EMERGENCY LIQUIDATION] Placing MARKET SELL for {free_sol_balance:.4f} SOL...", "sell")
+                    order = broker.execute_order(symbol="SOL/USDT", side="sell", amount=free_sol_balance)
+                    _log(f"[EMERGENCY LIQUIDATION] Closed SOL position. Order ID: {order.get('id')}", "sell")
             except Exception as exc:
                 _log(f"[EMERGENCY LIQUIDATION ERROR] Failed to liquidate SOL position: {exc}", "err")
-            
-            # Reset states
-            st.session_state.agent_positions[active_agent] = 0.0
-            st.session_state.agent_equity[active_agent] += pos_size * current_price
-        
+
+        # Reset states
+        st.session_state.agent_positions[active_agent] = 0.0
+        try:
+            fresh_usdt = broker.get_free_balance("USDT")
+            st.session_state.agent_equity[active_agent] = fresh_usdt
+        except Exception:
+            st.session_state.agent_equity[active_agent] += free_sol_balance * current_price
+
         # 2. Halt all trading loops and safely log out
         st.session_state.session_active = False
         st.session_state.broker = None

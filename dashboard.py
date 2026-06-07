@@ -47,8 +47,8 @@ logging.basicConfig(level=logging.WARNING)
 
 # ── Agent metadata ─────────────────────────────────────────────────────────────
 AGENT_META = {
-    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer", "active": True, "allocation_pct": 1.0},
-    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith", "active": False, "allocation_pct": 0.0},
+    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer", "active": False, "allocation_pct": 0.0},
+    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith", "active": True,  "allocation_pct": 1.0},
     "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis", "active": False, "allocation_pct": 0.0},
 }
 
@@ -377,11 +377,15 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
     # 4. Append performance snapshot for the equity chart
     init_price = st.session_state.initial_btc_price or current_price
     # Fetch actual starting allocation for Buy&Hold baseline
+    active_agent = next((k for k, v in AGENT_META.items() if v.get("active", False)), "Zenith")
     starting_alloc = 200.0
     if st.session_state.performance_history:
-        starting_alloc = st.session_state.performance_history[0].get("DimmerForce", 200.0)
+        starting_alloc = st.session_state.performance_history[0].get(active_agent, 200.0)
     else:
-        starting_alloc = st.session_state.agent_equity.get("DimmerForce", 200.0)
+        # Tick 1: starting allocation is cash + position * init_price of the active agent
+        cash = st.session_state.agent_equity.get(active_agent, 200.0)
+        pos = st.session_state.agent_positions.get(active_agent, 0.0)
+        starting_alloc = cash + (pos * init_price)
 
     buy_hold_equity = (current_price / init_price) * starting_alloc
 
@@ -406,15 +410,15 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
         _log(f"Emergency Check: Exchange USDT={real_usdt_balance:.2f}, SOL={real_sol_balance:.4f} (value=${real_sol_balance * current_price:.2f}), Total Equity=${emergency_total_equity:.2f}", "info")
     except Exception as exc:
         # Fallback to virtual tracking if exchange query fails
-        df_cash = st.session_state.agent_equity.get("DimmerForce", 200.0)
-        df_pos = st.session_state.agent_positions.get("DimmerForce", 0.0)
+        df_cash = st.session_state.agent_equity.get(active_agent, 200.0)
+        df_pos = st.session_state.agent_positions.get(active_agent, 0.0)
         emergency_total_equity = df_cash + (df_pos * current_price)
         _log(f"Exchange query failed during emergency check: {exc}. Falling back to virtual tracking (Total Equity=${emergency_total_equity:.2f}).", "err")
 
     if emergency_total_equity <= 570.0:
-        _log(f"[EMERGENCY WARNING] DimmerForce total equity fell to ${emergency_total_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
+        _log(f"[EMERGENCY WARNING] {active_agent} total equity fell to ${emergency_total_equity:.2f} (<= $570.00). Initiating immediate liquidation!", "err")
         # 1. Liquidate open positions on SOL
-        pos_size = st.session_state.agent_positions.get("DimmerForce", 0.0)
+        pos_size = st.session_state.agent_positions.get(active_agent, 0.0)
         broker = _get_broker()
         if pos_size <= 0.0:
             try:
@@ -431,14 +435,14 @@ def _run_tick(symbol: str, timeframe: str, candle_limit: int) -> None:
                 _log(f"[EMERGENCY LIQUIDATION ERROR] Failed to liquidate SOL position: {exc}", "err")
             
             # Reset states
-            st.session_state.agent_positions["DimmerForce"] = 0.0
-            st.session_state.agent_equity["DimmerForce"] += pos_size * current_price
+            st.session_state.agent_positions[active_agent] = 0.0
+            st.session_state.agent_equity[active_agent] += pos_size * current_price
         
         # 2. Halt all trading loops and safely log out
         st.session_state.session_active = False
         st.session_state.broker = None
         _log("[EMERGENCY STOP-LOSS TRIGGERED] SOL position liquidated. Trading halted.", "err")
-        st.warning("⚠️ EMERGENCY GLOBAL STOP-LOSS TRIGGERED: DimmerForce equity fell to or below $570.00 (5% drawdown). SOL position liquidated, trading session halted.")
+        st.warning(f"⚠️ EMERGENCY GLOBAL STOP-LOSS TRIGGERED: {active_agent} equity fell to or below $570.00 (5% drawdown). SOL position liquidated, trading session halted.")
         st.rerun()
 
     st.session_state.performance_history.append({
@@ -473,15 +477,20 @@ def _execute_order(agent_name: str, signal: dict, symbol: str) -> None:
     agent_capital = st.session_state.agent_equity.get(agent_name, 200.0)
     current_price = st.session_state.last_price or 0.0
 
+    limit_price = signal.get("price", None)
+    allocation_fraction = signal.get("allocation_fraction", 1.0)
+    execution_price = limit_price if limit_price is not None else current_price
+
     try:
         broker = _get_broker()
 
         if action == "BUY":
+            trade_capital = agent_capital * allocation_fraction
             # Guard: simulated capital must be meaningful before placing an order.
-            if agent_capital < 5.0:
+            if trade_capital < 5.0:
                 _log(
-                    f"[{agent_name}] BUY skipped — simulated capital too low "
-                    f"(${agent_capital:.2f})",
+                    f"[{agent_name}] BUY skipped — simulated trade capital too low "
+                    f"(${trade_capital:.2f})",
                     "err",
                 )
                 return
@@ -492,11 +501,11 @@ def _execute_order(agent_name: str, signal: dict, symbol: str) -> None:
             rm = RiskManager()
             metrics = rm.calculate_position_size(
                 signal_action="BUY",
-                current_price=current_price,
-                atr=atr if atr > 0 else current_price * 0.003,
+                current_price=execution_price,
+                atr=atr if atr > 0 else execution_price * 0.003,
                 # STRICT CAPITAL ISOLATION
-                # Use the agent's individual simulated equity (cash balance).
-                available_capital=agent_capital,
+                # Use the agent's scaled virtual equity.
+                available_capital=trade_capital,
             )
             units = metrics.get("units", 0.0)
             cost  = metrics.get("cost_usdt", 0.0)
@@ -505,13 +514,14 @@ def _execute_order(agent_name: str, signal: dict, symbol: str) -> None:
                 _log(f"[{agent_name}] BUY skipped — RiskManager returned 0 units.", "err")
                 return
 
+            order_type_str = "LIMIT" if limit_price is not None else "MARKET"
             _log(
-                f"[{agent_name}] Placing MARKET BUY {units:.8f} {symbol} "
-                f"@ ~${current_price:,.2f}  (capital=${agent_capital:.2f}, cost=${cost:.2f})",
+                f"[{agent_name}] Placing {order_type_str} BUY {units:.8f} {symbol} "
+                f"@ ${execution_price:,.2f}  (trade_capital=${trade_capital:.2f}, cost=${cost:.2f})",
                 "buy",
             )
-            order = broker.execute_order(symbol=symbol, side="buy", amount=units)
-            _log(f"[{agent_name}] Order filled — id={order.get('id')} status={order.get('status')}", "buy")
+            order = broker.execute_order(symbol=symbol, side="buy", amount=units, price=limit_price)
+            _log(f"[{agent_name}] Order filled/placed — id={order.get('id')} status={order.get('status')}", "buy")
 
             # Deduct actual cost from simulated cash equity.
             st.session_state.agent_equity[agent_name] = max(0.0, agent_capital - cost)
@@ -528,28 +538,35 @@ def _execute_order(agent_name: str, signal: dict, symbol: str) -> None:
                 _log(f"[{agent_name}] SELL skipped — no virtual position to sell.", "err")
                 return
 
-            base_ticker = symbol.split("/")[0]  # e.g. "BTC"
+            base_ticker = symbol.split("/")[0]  # e.g. "SOL"
             broker_balance = broker.get_free_balance(base_ticker)
             
-            # Cap the physical order amount to what's actually available on the testnet account
-            # to prevent insufficient balance errors due to slippage/fees.
-            amount_to_sell = min(position_size, broker_balance)
+            rm = RiskManager()
+            amount_to_scale = position_size * allocation_fraction
+            amount_to_scale = rm._truncate_to_step(amount_to_scale, rm.lot_step_size)
+            if amount_to_scale < rm.min_lot_size:
+                amount_to_scale = rm.min_lot_size
+
+            # Cap the physical order amount to what's actually available
+            amount_to_sell = min(amount_to_scale, position_size, broker_balance)
+            amount_to_sell = rm._truncate_to_step(amount_to_sell, rm.lot_step_size)
             if amount_to_sell <= 0.0:
-                _log(f"[{agent_name}] SELL skipped — physical {base_ticker} balance is 0.", "err")
+                _log(f"[{agent_name}] SELL skipped — physical {base_ticker} balance is 0 or too small.", "err")
                 return
 
-            sell_value = position_size * current_price
+            sell_value = amount_to_sell * execution_price
+            order_type_str = "LIMIT" if limit_price is not None else "MARKET"
             _log(
-                f"[{agent_name}] Placing MARKET SELL {amount_to_sell:.8f} {symbol} "
-                f"@ ~${current_price:,.2f} (est. return=${sell_value:.2f})",
+                f"[{agent_name}] Placing {order_type_str} SELL {amount_to_sell:.8f} {symbol} "
+                f"@ ${execution_price:,.2f} (est. return=${sell_value:.2f})",
                 "sell",
             )
-            order = broker.execute_order(symbol=symbol, side="sell", amount=amount_to_sell)
-            _log(f"[{agent_name}] Order filled — id={order.get('id')} status={order.get('status')}", "sell")
+            order = broker.execute_order(symbol=symbol, side="sell", amount=amount_to_sell, price=limit_price)
+            _log(f"[{agent_name}] Order filled/placed — id={order.get('id')} status={order.get('status')}", "sell")
 
             # Credit estimated USDT proceeds back to simulated cash equity.
             st.session_state.agent_equity[agent_name] = agent_capital + sell_value
-            st.session_state.agent_positions[agent_name] = 0.0
+            st.session_state.agent_positions[agent_name] = max(0.0, position_size - amount_to_sell)
             _log(
                 f"[{agent_name}] Simulated cash equity updated: "
                 f"${agent_capital:.2f} → ${st.session_state.agent_equity[agent_name]:.2f}",
@@ -574,11 +591,17 @@ if not st.session_state.session_active and not st.session_state.get("live_balanc
     try:
         real_usdt = broker_instance.get_free_balance("USDT")
         real_sol = broker_instance.get_free_balance("SOL")
+        
+        # Fetch current price to calculate absolute total equity
+        ticker = broker_instance.exchange.fetch_ticker("SOL/USDT")
+        current_price = float(ticker["last"])
+        total_equity = real_usdt + (real_sol * current_price)
+        
         for k, meta in AGENT_META.items():
             st.session_state.agent_equity[k] = real_usdt * meta.get("allocation_pct", 1.0/3.0)
             st.session_state.agent_positions[k] = real_sol * meta.get("allocation_pct", 1.0/3.0)
         st.session_state.live_balance_loaded = True
-        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT and position {real_sol:.4f} SOL.", "info")
+        _log(f"Startup: Loaded live wallet balance {real_usdt:,.2f} USDT and position {real_sol:.4f} SOL. Total Equity: ${total_equity:,.2f} USDT.", "info")
     except Exception as exc:
         pass
 
@@ -715,6 +738,11 @@ with ctrl_left:
                 real_usdt = broker.get_free_balance("USDT")
                 base_asset = symbol.split("/")[0]
                 real_sol = broker.get_free_balance(base_asset)
+                
+                # Fetch price to log absolute total equity
+                ticker = broker.exchange.fetch_ticker(symbol)
+                current_price = float(ticker["last"])
+                total_equity = real_usdt + (real_sol * current_price)
 
                 st.session_state.session_active      = True
                 st.session_state.session_start_ts    = time.time()
@@ -729,7 +757,7 @@ with ctrl_left:
                 st.session_state.agent_equity        = {k: real_usdt * meta.get("allocation_pct", 1.0/3.0) for k, meta in AGENT_META.items()}
                 st.session_state.agent_positions     = {k: real_sol * meta.get("allocation_pct", 1.0/3.0) for k, meta in AGENT_META.items()}
                 _log(f"Session started — duration={session_hours}h  interval={tick_interval_s}s  "
-                     f"symbol={symbol}  agents=Autonomous Loop", "info")
+                     f"symbol={symbol}  agents=Autonomous Loop. Total Equity: ${total_equity:,.2f} USDT.", "info")
                 
                 # Log detailed allocation information per agent
                 for k, meta in AGENT_META.items():

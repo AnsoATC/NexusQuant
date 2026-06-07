@@ -104,6 +104,14 @@ class FeatureEngineer:
         enriched["ROC_5"] = ((enriched["close"] - enriched["close"].shift(5)) / enriched["close"].shift(5)) * 100
         logger.debug("ROC_5 calculated.")
 
+        # ── Bollinger Bands (20, 2) ──────────────────────────────────────────
+        ma = enriched["close"].rolling(window=20).mean()
+        std = enriched["close"].rolling(window=20).std()
+        enriched["BBL_20_2.0"] = ma - 2 * std
+        enriched["BBM_20_2.0"] = ma
+        enriched["BBU_20_2.0"] = ma + 2 * std
+        logger.debug("Bollinger Bands (20, 2) calculated.")
+
         rows_before = len(enriched)
         enriched.dropna(inplace=True)
         rows_dropped = rows_before - len(enriched)

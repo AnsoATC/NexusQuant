@@ -20,12 +20,14 @@ class ZenithAgent(BaseAgent):
 
     **Framework:**
       - Center Line (Mean): 20-period SMA.
-      - Grid spacing: 0.6% intervals above and below the center line.
+      - Grid spacing: 0.4% intervals above and below the center line.
       - Buy dips: Places buy limit orders in micro-positions (allocation_fraction=0.33)
-        when the price falls below the lower grid lines (or RSI <= 35).
+        when the price falls below the lower grid lines (or RSI <= 40).
       - Sell bounces: Places sell limit orders to scale out and lock in profits
-        when the price rises above the upper grid lines (or RSI >= 65).
+        when the price rises above the upper grid lines (or RSI >= 60).
     """
+    grid_interval: float = 0.004
+    rsi_bounds: list[int] = [40, 60]
 
     @property
     def name(self) -> str:
@@ -77,7 +79,9 @@ class ZenithAgent(BaseAgent):
             rsi = 50.0
 
         # Define 3 levels of buy grid and 3 levels of sell grid
-        grid_spacing = 0.006  # 0.6% spacing
+        grid_spacing = self.grid_interval
+        rsi_lower = self.rsi_bounds[0]
+        rsi_upper = self.rsi_bounds[1]
 
         buy_grid_1 = bbm * (1.0 - 1 * grid_spacing)
         buy_grid_2 = bbm * (1.0 - 2 * grid_spacing)
@@ -94,7 +98,7 @@ class ZenithAgent(BaseAgent):
         allocation_fraction = 1.0
 
         # Mean Reversion / Grid logic
-        if current_price <= buy_grid_1 or current_price <= bbl or rsi <= 35:
+        if current_price <= buy_grid_1 or current_price <= bbl or rsi <= rsi_lower:
             # DIP DETECTED -> BUY
             action = "BUY"
             if current_price <= buy_grid_3:
@@ -112,7 +116,7 @@ class ZenithAgent(BaseAgent):
                 confidence = 0.75
                 reason = f"Light dip: Close ({current_price:.2f}) <= Buy Grid 1 ({buy_grid_1:.2f}) or BBL ({bbl:.2f}). RSI={rsi:.1f}."
                 allocation_fraction = 0.33
-        elif current_price >= sell_grid_1 or current_price >= bbu or rsi >= 65:
+        elif current_price >= sell_grid_1 or current_price >= bbu or rsi >= rsi_upper:
             # BOUNCE DETECTED -> SELL (if holding position)
             if current_position_size > 0.0:
                 action = "SELL"

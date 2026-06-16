@@ -47,8 +47,8 @@ logging.basicConfig(level=logging.WARNING)
 
 # ── Agent metadata ─────────────────────────────────────────────────────────────
 AGENT_META = {
-    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer", "active": False, "allocation_pct": 0.0},
-    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith", "active": True,  "allocation_pct": 1.0},
+    "DimmerForce": {"icon":"📈","color":"#818cf8","persona":"Trend Follower","card":"card-dimmer", "active": True,  "allocation_pct": 1.0},
+    "Zenith":      {"icon":"🔄","color":"#34d399","persona":"Mean Reversion","card":"card-zenith", "active": False, "allocation_pct": 0.0},
     "Aegis":       {"icon":"🛡️","color":"#f472b6","persona":"Conservative",  "card":"card-aegis", "active": False, "allocation_pct": 0.0},
 }
 
